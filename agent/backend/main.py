@@ -3,12 +3,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from backend.api.routers import agentic, documents, grief_notes, sessions
+from backend.core.auth import logger as auth_logger
 from backend.core.config import get_settings
 from backend.db.connection import close_db_pool
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if get_settings().auth_disabled:
+        auth_logger.warning("AUTH_DISABLED is on: requests need no token and share one guest user.")
     # Documents whose embedding was interrupted (e.g. by a restart) continue in the background.
     await documents.ingestion_worker.resume_unfinished()
     try:

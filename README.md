@@ -167,6 +167,7 @@ Configuration is loaded from `agent/.env` or environment variables:
 | `AGENTIC_STREAM_DELAY_SECONDS` | Release delay between SSE chunks; default: 0.03 seconds |
 | `DATABASE_URL` | Held PostgreSQL connection string |
 | `JWT_SECRET` | Server-side HS256 key for agent API tokens; required by the local development terminal client |
+| `AUTH_DISABLED` | Testing only. `true` accepts requests without a token, all as one shared guest user; default: `false` |
 | `HELD_API_BASE_URL` | Held API base URL (profiles for the server; sign-in, sign-up and onboarding for the terminal client) |
 | `HELD_ACTIVE_USER` | Terminal client account: `1` uses `users/user1.json`, `2` uses `users/user2.json` |
 
@@ -183,6 +184,15 @@ time they authenticate. `POST /agentic/users/register` does this explicitly, and
 terminal client calls it right after sign-up, onboarding and sign-in. Held's `SELF` role
 is stored as `USER` and `PARTNER` as `SPOUSE`; no password is stored, a Held profile
 can never create an `ADMIN`, and existing rows are never changed.
+
+### Testing without a token
+
+`AUTH_DISABLED=true` lets a test deployment be called without a token. Any token sent is
+ignored, and every caller is the same non-admin guest user (`held-ai-guest`, added to
+`public."User"` on first use). Callers therefore share each other's chats and memory,
+admin routes answer `403`, and replies have no Held profile context. Sessions of real
+users stay hidden from the guest. Do not enable this where real users' data is expected,
+and remove the variable when testing ends.
 
 ### Terminal client and token refresh
 

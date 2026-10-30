@@ -15,7 +15,8 @@ from backend.ai_wrapper.orchestrator import (
     AgenticPipeline,
 )
 from backend.ai_wrapper.supervisor.schemas import ExecutionPlan
-from backend.core.config import Settings
+from backend.core.auth import GUEST_PROFILE
+from backend.core.config import Settings, get_settings
 from backend.db import repository
 from backend.main import app
 
@@ -295,6 +296,74 @@ def test_invalid_requests(api, payload):
     client, provider = api
     assert client.post("/agentic/run", json=payload).status_code == 422
     assert provider.calls == []
+
+
+@pytest.fixture
+def guest_api(monkeypatch, fake_repo):
+    """A client sending no token to a deployment running with AUTH_DISABLED."""
+    provider = FakeProvider()
+    monkeypatch.setattr(get_settings(), "auth_disabled", True)
+    monkeypatch.setattr(agentic, "pipeline", AgenticPipeline(provider, Settings(_env_file=None)))
+    monkeypatch.setattr(agentic, "generate_title", AsyncMock(return_value="Title"))
+    with TestClient(app) as client:
+        yield client, provider
+
+
+def test_tokens_are_required_unless_auth_is_explicitly_disabled():
+    assert Settings(_env_file=None).auth_disabled is False
+
+
+@pytest.mark.parametrize("path", ["/agentic/run", "/agentic/stream"])
+def test_disabled_auth_answers_without_a_token_as_the_guest(guest_api, fake_repo, profile_lookup, path):
+    client, provider = guest_api
+
+    result = client.post(path, json={"prompt": "I feel lonely."})
+
+    assert result.status_code == 200
+    assert "audited" in result.text
+    assert [s["user_id"] for s in fake_repo.sessions.values()] == [GUEST_PROFILE["id"]]
+    assert "user_context" not in provider.payloads[-1]
+    profile_lookup.assert_not_awaited()
+
+
+def test_disabled_auth_adds_the_guest_only_once(guest_api, fake_repo):
+    client, _ = guest_api
+    assert client.post("/agentic/run", json={"prompt": "Hello"}).status_code == 200
+    assert client.post("/agentic/run", json={"prompt": "Hello again"}).status_code == 200
+    assert fake_repo.created_from_profiles == [GUEST_PROFILE]
+
+
+@pytest.mark.parametrize("authorization", ["Bearer invalid-token", "Bearer ", "Basic invalid-token"])
+def test_disabled_auth_ignores_any_token_sent(guest_api, authorization):
+    client, _ = guest_api
+    assert client.get("/agentic/sessions", headers={"Authorization": authorization}).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/agentic/users", "/agentic/users/usr_1", "/agentic/admin/overview"])
+@pytest.mark.parametrize("guest_role", ["USER", "ADMIN"])
+def test_disabled_auth_keeps_admin_routes_closed(guest_api, fake_repo, path, guest_role):
+    client, _ = guest_api
+    fake_repo.users[GUEST_PROFILE["id"]] = guest_role
+    assert client.get(path).status_code == 403
+
+
+def test_disabled_auth_hides_other_users_sessions(guest_api, fake_repo):
+    client, _ = guest_api
+    private = asyncio.run(fake_repo.create_chat_session(user_id="usr_1", title="Private"))["id"]
+
+    assert client.get("/agentic/sessions").json() == []
+    assert client.get(f"/agentic/sessions/{private}/messages").status_code == 404
+    assert client.post("/agentic/run", json={"prompt": "Hi", "session_id": private}).status_code == 404
+    assert client.delete(f"/agentic/sessions/{private}").status_code == 404
+    assert private in fake_repo.sessions
+
+
+def test_disabled_auth_reports_an_unavailable_database(guest_api, monkeypatch):
+    client, _ = guest_api
+    monkeypatch.setattr(repository, "get_auth_user", AsyncMock(side_effect=RuntimeError("Database is unavailable.")))
+    result = client.post("/agentic/run", json={"prompt": "Hi"})
+    assert result.status_code == 503
+    assert result.json() == {"detail": "The guest user is unavailable."}
 
 
 def test_reasoning_route(api):

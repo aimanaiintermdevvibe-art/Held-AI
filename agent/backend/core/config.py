@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     database_url: str = ""
     database_pooler_url: str = ""
     jwt_secret: str = ""
+    # Testing only: requests need no token and all share one non-admin guest user.
+    auth_disabled: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(

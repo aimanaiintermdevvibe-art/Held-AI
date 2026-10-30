@@ -44,6 +44,8 @@ The Held AI Agent API provides multi-agent AI support and persists conversations
 
 ## Authentication
 
+> **Test deployments**: with `AUTH_DISABLED=true`, no token is needed and any token sent is ignored. Every caller is one shared non-admin guest user, so callers see each other's chats and memory, and admin routes return `403`. See "Testing without a token" in the README. The rest of this section describes the default, with authentication on.
+
 `GET /` and `GET /agentic/health` are public. Session, user, and admin endpoints require the Held application's signed HS256 access token:
 
 ```http
