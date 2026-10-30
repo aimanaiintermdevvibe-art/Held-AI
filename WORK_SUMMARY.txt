@@ -1,0 +1,102 @@
+HELD AI CHATBOT - WORK SUMMARY
+==================================================
+
+1. WHAT WAS DONE
+----------------
+- Profiles: the agent called Held's GET /users/{id}, which does not exist, so personalisation
+  silently failed. It now reads GET /auth/me with the caller's own token.
+- User modes: four modes from the Held profile (myself / caregiver x diagnosed / no diagnosis),
+  given to the reasoner, writer and safety auditor.
+- Test accounts: no login/sign-up in the terminal chat. users/user1.json (hashirflutter) and
+  users/user2.json (princejack66) hold credentials and their own token pair; HELD_ACTIVE_USER=1|2
+  in .env selects one. Tokens refresh automatically (rotation-safe, cross-process lock).
+  agent/scripts/refresh_token.py writes a fresh token into .env for Postman.
+- Authentication: tokens signed with JWT_SECRET are verified locally; tokens signed by Held's
+  test server are confirmed with Held (cached 60 s). Held users missing from Supabase are added
+  automatically (POST /agentic/users/register does it explicitly).
+- Cross-chat memory fixed (see section 4).
+- Disease catalogue: 21 diseases seeded from Held into public."Disease".
+- Documents + RAG with pgvector, background ingestion for any length (section 2).
+- Grief notes with workbook exercises (section 3).
+- Tests: 279 passed, 1 pre-existing failure (test_odd_unicode_spaces_are_normalised).
+- Postman: postman/Held_AI_Agent.postman_collection.json (logs in to Held automatically).
+- Logs: logs/rag_pgvector_setup_and_test.log (setup and tests), logs/document_ingestion.log
+  (live embedding progress).
+
+Supabase migrations (agent/migrations, apply with python agent/migrations/apply.py <file>):
+  002 documents + document_chunks (pgvector, vector(768), HNSW)   003 Disease
+  004 background ingestion (status, progress, resumable)           005 grief_notes + Mood
+
+2. DOCUMENTS (RAG)
+------------------
+All endpoints need the Held bearer token; users only see their own documents.
+  POST   /agentic/documents                upload .txt/.md/.pdf/.docx (form-data "file", any length, 50 MB)
+                                           -> 202 queued; the same file again -> 200 (resumes if stopped)
+  GET    /agentic/documents                list (status, chunk_count/total_chunks, progress %)
+  GET    /agentic/documents/{id}           status + page of chunks (?chunk_offset=0&chunk_limit=50)
+  POST   /agentic/documents/search         {"query": "...", "top_k": 5} -> nearest chunks + similarity
+  DELETE /agentic/documents/{id}           document and its chunks
+How it works:
+- Upload extracts the text (PDF keeps page numbers), splits it into ~800-character chunks with
+  150 characters of overlap and stores them. A background worker in the server embeds them with
+  gemini-embedding-001 (768 dims), 100 per request, saving each batch.
+- Status: queued -> processing -> ready; paused while Gemini's daily quota is used up (continues
+  by itself); failed on other errors (upload the same file again to resume). Unfinished documents
+  resume when the server starts. INGESTION_WORKER=false turns the worker off in an instance.
+- Chat: each message is embedded and the user's chunks with cosine similarity >= 0.55 are given
+  to the agents; the reply cites the file and the response lists "sources".
+- agent/scripts/split_document.py splits a long PDF into page ranges, or text/Word into parts.
+
+3. GRIEF NOTES (with workbook exercises)
+----------------------------------------
+Held's notes API (one note per user per date, with a mood) stays the source of truth. The agent
+writes/reads through it with the caller's token and stores every note in public.grief_notes,
+together with the workbook exercise it answers (kept by the agent only).
+  GET    /agentic/grief-notes/exercises    9 guided exercises (key, title, prompt)
+  GET    /agentic/grief-notes/moods        20 moods (seeded from Held)
+  POST   /agentic/grief-notes/sync         store all existing Held notes of the user
+  GET    /agentic/grief-notes              list, newest first (?page&limit&from&to); stored copy if Held is down
+  POST   /agentic/grief-notes              {"date","content","mood" or "moodId","exercise"?}; 409 if the date exists
+  GET    /agentic/grief-notes/{date}       one note
+  PATCH  /agentic/grief-notes/{date}       content/mood (to Held) and/or exercise (null clears it)
+- No delete: Held's API has none.
+- Chat: a message that mentions the user's notes/journal/diary/workbook gets their 10 most
+  recent notes as context; other messages do not.
+- Saving notes from chat is not offered: Held requires a mood and one note per day, which the
+  agent would have to guess.
+- Live: user 1's 5 existing notes are stored. Create/edit were tested against a simulated Held
+  only, because Held cannot delete notes and test notes would stay on the test accounts.
+
+4. HOW CONTEXT MEMORY WORKS
+---------------------------
+- Same chat (session_id): the whole conversation when it fits (120,000 characters); otherwise a
+  rolling summary of older turns (written in the background every 10 messages) + the latest
+  40 messages.
+- New chats: recaps of the user's 10 most recent other chats (title, summary if any, the user's
+  last 6 messages) plus "safety_concerns" (their messages there flagged by the crisis check, e.g.
+  "I want to die").
+- The writer recalls earlier chats when asked, connects people/situations mentioned before, and
+  checks in gently once per chat about an earlier safety concern when the user talks about how they
+  feel. Routing and off-topic answers never use other chats.
+- Not yet: the bot's own earlier replies, chats older than the latest 10, long-term facts, and
+  clearing a resolved safety concern (planned "proper context memory" work).
+
+5. WHY THE DSM-5-TR BOOK IS NOT VECTORISED YET
+----------------------------------------------
+- The PDF produces 6,988 chunks. Gemini's free tier embeds at most ~100 chunks per minute and
+  ~1,000 per day per key.
+- Status now: paused at 900/6,988 (12.9%). The daily quota of the new key ran out; the worker
+  continues automatically at about 2026-10-29 11:58 if the server is running (or at the next start).
+- At this rate the whole book needs about 7 days. Until then, search and chat only see the
+  embedded part (roughly the first 13% of the book), and once a day's quota is used up, chat
+  document search returns nothing for the rest of that day.
+- To finish quickly: enable billing on the Gemini key (minutes, small cost), or upload only the
+  chapters needed (split_document.py), or use larger chunks (DOCUMENT_CHUNK_CHARS).
+- Note: DSM-5-TR is copyrighted by the APA; check licensing before using it in the product.
+
+6. HOW TO RUN
+-------------
+  Server:   cd agent ; ..\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+  Chat:     .venv\Scripts\python.exe chat.py            (user from HELD_ACTIVE_USER in .env)
+  Token:    .venv\Scripts\python.exe agent\scripts\refresh_token.py   (for Postman, 15 minutes)
+  Tests:    cd agent ; ..\.venv\Scripts\python.exe -m pytest -q

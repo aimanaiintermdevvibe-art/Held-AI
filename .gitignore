@@ -1,0 +1,62 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python virtual environment & cache
+.venv/
+.venv.*/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+pytest-cache-files-*/
+.ruff_cache/
+**/.ruff_cache/
+*.egg-info/
+
+# Local test accounts: credentials and live Held tokens (see users/user.example.json)
+users/*.json
+!users/user.example.json
+users/.*.lock
+users/*.tmp
+
+# Runtime logs and generated test/build output
+logs/*.log
+.coverage
+htmlcov/
+build/
+dist/
+
+# Postman collection with the test login
+postman/*.postman_collection.json
+
+# IDE & Editor files
+.vscode/
+
+# Node.js and dependencies (all locations)
+node_modules/
+**/node_modules/
+package.json
+**/package.json
+package-lock.json
+**/package-lock.json
+yarn.lock
+pnpm-lock.yaml
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Non-agent code, Node.js, database and website folders
+non-agent/
+**/non-agent/
+node.js/
+**/node.js/
+/db/
+website/
+**/website/
+!agent/backend/db/
+!agent/backend/db/**
+agent/backend/db/**/__pycache__/

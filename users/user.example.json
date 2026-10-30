@@ -1,0 +1,9 @@
+{
+  "label": "User N",
+  "email": "user@example.com",
+  "password": "",
+  "held_api_base_url": "http://192.168.18.15:4000/api",
+  "user_id": "",
+  "access_token": "",
+  "refresh_token": ""
+}
