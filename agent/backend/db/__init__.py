@@ -9,6 +9,7 @@ from backend.db.repository import (
     list_users,
     get_user_by_id,
     create_user_from_profile,
+    ping_database,
     get_database_overview,
 )
 
@@ -24,5 +25,6 @@ __all__ = [
     "list_users",
     "get_user_by_id",
     "create_user_from_profile",
+    "ping_database",
     "get_database_overview",
 ]

@@ -514,6 +514,17 @@ async def upsert_diseases(diseases: List[Dict[str, Any]]) -> Dict[str, int]:
     return {"added": added, "updated": changed, "unchanged": len(diseases) - added - changed}
 
 
+async def ping_database() -> bool:
+    """Whether the database answers a trivial query."""
+    pool = await get_db_pool()
+    if not pool:
+        return False
+
+    async with pool.acquire() as conn:
+        await conn.fetchval("SELECT 1;")
+    return True
+
+
 async def get_database_overview() -> Dict[str, Any]:
     """Return counts for tables confirmed in the Held database."""
     pool = await get_db_pool()

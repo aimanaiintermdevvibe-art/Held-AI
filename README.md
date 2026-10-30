@@ -145,7 +145,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Set GEMINI_API_KEY in .env before sending prompts. JWT_SECRET is only needed
-# for protected health, session, user, and admin endpoints.
+# for protected session, user, and admin endpoints.
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -273,9 +273,10 @@ fallback if the provider fails.
 Error responses use `{"detail":"..."}`; validation errors return a structured
 `detail` list. Additional request fields are rejected.
 
-`/agentic/health`, session history and session deletion are available to
-authenticated callers. User listing/profile and database overview require an
-`ADMIN` token. The current Held schema has no Disease table, so the disease
+`GET /` (the process is up) and `GET /agentic/health` (plus whether the database
+answers) are public and need no token. Session history and session deletion are
+available to authenticated callers. User listing/profile and database overview
+require an `ADMIN` token. The current Held schema has no Disease table, so the disease
 endpoint is unavailable.
 
 ## Streaming API

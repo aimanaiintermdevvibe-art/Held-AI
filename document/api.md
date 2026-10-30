@@ -17,7 +17,8 @@ The Held AI Agent API provides multi-agent AI support and persists conversations
 | :--- | :--- | :--- | :--- |
 | **Agent** | `POST` | `/agentic/stream` | Progressive Server-Sent Events (SSE) stream (with automatic session creation & details) |
 | **Agent** | `POST` | `/agentic/run` | Standard JSON response payload (with automatic session creation & details) |
-| **Agent** | `GET` | `/agentic/health` | Service & Held PostgreSQL health status |
+| **Health** | `GET` | `/` | Public liveness check; touches no database or Held API |
+| **Agent** | `GET` | `/agentic/health` | Public service & Held PostgreSQL health status |
 | **Sessions** | `GET` | `/agentic/sessions` | List the authenticated user's chat sessions (admins can list all) |
 | **Sessions** | `GET` | `/agentic/sessions/{id}/messages` | Retrieve chronological message history |
 | **Sessions** | `DELETE` | `/agentic/sessions/{id}` | Delete a chat session and all its messages |
@@ -43,7 +44,7 @@ The Held AI Agent API provides multi-agent AI support and persists conversations
 
 ## Authentication
 
-Health, session, user, and admin endpoints require the Held application's signed HS256 access token:
+`GET /` and `GET /agentic/health` are public. Session, user, and admin endpoints require the Held application's signed HS256 access token:
 
 ```http
 Authorization: Bearer <held_access_token>
@@ -51,7 +52,7 @@ Authorization: Bearer <held_access_token>
 
 The token's `sub` claim must be the `id` of a row in `public."User"` (see `agent/migrations/001_user_and_chat_tables.sql`); a Held user missing from that table is added from their Held profile (`GET /auth/me`) on first use, and only a token for an id Held does not know returns `401` with code `USER_NOT_FOUND`. Tokens signed with `JWT_SECRET` are verified locally; a token signed with another key is accepted only when Held confirms it through `GET /auth/me`. The user's stored `role` is normalized to `ADMIN`, `CAREGIVER`, or `SELF` (a missing role is `SELF`). `CAREGIVER` and `SELF` can access only sessions owned by their token subject; `ADMIN` can access all sessions. A `user_id` supplied in a request body is ignored for ownership. User listing/profile and database overview endpoints are admin-only.
 
-`POST /agentic/run` and `POST /agentic/stream` **require** a valid token whose subject exists in `public."User"`; every turn is saved and remembered through [Context memory](#7-context-memory). A missing token returns `401 TOKEN_MISSING`, an invalid or expired one `401 TOKEN_INVALID` / `TOKEN_EXPIRED`, and a token for an id not in `User` returns `401 USER_NOT_FOUND`. The same token protects the health, session, user, and admin routes. `JWT_SECRET` is a server-only verification key; never send it in a request or use it as the bearer token.
+`POST /agentic/run` and `POST /agentic/stream` **require** a valid token whose subject exists in `public."User"`; every turn is saved and remembered through [Context memory](#7-context-memory). A missing token returns `401 TOKEN_MISSING`, an invalid or expired one `401 TOKEN_INVALID` / `TOKEN_EXPIRED`, and a token for an id not in `User` returns `401 USER_NOT_FOUND`. The same token protects the session, user, and admin routes. `JWT_SECRET` is a server-only verification key; never send it in a request or use it as the bearer token.
 
 For each generation request, the agent also fetches the caller's profile from the Held API (`GET /auth/me`) using the caller's own bearer token, so the server needs no Held credentials. The onboarding answers in it select one of four user modes (`myself_diagnosed`, `myself_undiagnosed`, `caregiver_diagnosed`, `caregiver_undiagnosed`), which are passed to clinical reasoning, response synthesis and the compliance review as `user_context`. If Held profile lookup fails, the agent logs a warning and continues without a user mode.
 
@@ -337,11 +338,26 @@ curl -X DELETE "https://held-ai-chatbot.onrender.com/agentic/sessions/1baa9da8-c
 
 ## 4. Health & Database Overview Endpoints
 
-### 4.1 Health Check: `GET /agentic/health`
-Checks FastAPI service and Held PostgreSQL connection status.
+### 4.1 Liveness Check: `GET /`
+Public. Confirms the API process is running; it does not check the database or the Held API.
 
 ```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/health" -H "Authorization: Bearer $HELD_ACCESS_TOKEN"
+curl -X GET "https://held-ai-chatbot.onrender.com/"
+```
+
+#### Response (`200 OK`)
+```json
+{
+  "status": "ok",
+  "app_name": "Held AI Agent API"
+}
+```
+
+### 4.2 Health Check: `GET /agentic/health`
+Public. Checks FastAPI service and Held PostgreSQL connection status. The database gets 5 seconds to answer. The response is always `200 OK`: when the database is unreachable, `status` is `degraded` and `connected` is `false`.
+
+```bash
+curl -X GET "https://held-ai-chatbot.onrender.com/agentic/health"
 ```
 
 #### Response (`200 OK`)
@@ -350,19 +366,12 @@ curl -X GET "https://held-ai-chatbot.onrender.com/agentic/health" -H "Authorizat
   "status": "ok",
   "app_name": "Held AI Agent API",
   "database": {
-    "connected": true,
-    "counts": {
-      "users_count": 4,
-      "diseases_count": 7,
-      "user_diseases_count": 2,
-      "sessions_count": 3,
-      "messages_count": 8
-    }
+    "connected": true
   }
 }
 ```
 
-### 4.2 Database Entity Overview: `GET /agentic/admin/overview`
+### 4.3 Database Entity Overview: `GET /agentic/admin/overview`
 Returns read-only counts for `User`, `chat_sessions`, and `chat_messages`.
 
 ```bash

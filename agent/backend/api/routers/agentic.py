@@ -25,6 +25,7 @@ router = APIRouter(prefix="/agentic")
 settings = get_settings()
 gemini_client = GeminiClient(settings)
 pipeline = AgenticPipeline(gemini_client, settings)
+HEALTH_DB_TIMEOUT_SECONDS = 5.0
 
 # ---------------------------------------------------------------------------
 # Background summarisation queue
@@ -83,21 +84,20 @@ def _enqueue_summary(session_id: str) -> None:
     queue.put_nowait(_do_summary)
 
 
-@router.get(
-    "/health",
-    tags=["Health"],
-    summary="Agent API & DB Health",
-    dependencies=[Depends(require_auth)],
-)
+@router.get("/health", tags=["Health"], summary="Agent API & DB Health")
 async def health_check():
-    db_overview = await repository.get_database_overview()
+    # Public: reports no row counts (see /agentic/admin/overview), and an unreachable
+    # database must not hold the request for the pool's 60 s connect timeout.
+    try:
+        async with asyncio.timeout(HEALTH_DB_TIMEOUT_SECONDS):
+            connected = await repository.ping_database()
+    except Exception as exc:
+        logger.warning("Health check could not reach the database: %r", exc)
+        connected = False
     return {
-        "status": "ok",
+        "status": "ok" if connected else "degraded",
         "app_name": settings.app_name,
-        "database": {
-            "connected": db_overview.get("connected", False),
-            "counts": db_overview.get("counts", {}),
-        },
+        "database": {"connected": connected},
     }
 
 

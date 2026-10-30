@@ -16,6 +16,7 @@ from backend.ai_wrapper.orchestrator import (
 )
 from backend.ai_wrapper.supervisor.schemas import ExecutionPlan
 from backend.core.config import Settings
+from backend.db import repository
 from backend.main import app
 
 
@@ -129,12 +130,59 @@ def test_allowed_routes():
 
 
 @pytest.mark.parametrize("path", [
-    "/", "/health", "/docs", "/redoc", "/openapi.json", "/auth/me",
+    "/health", "/docs", "/redoc", "/openapi.json", "/auth/me",
     "/agentic/capabilities", "/agentic/conversations", "/agentic/grief-calendar/entries",
 ])
 def test_removed_endpoints(api, path):
     client, _ = api
     assert client.get(path).status_code == 404
+
+
+def test_liveness_is_public_and_skips_the_database(api, monkeypatch):
+    client, _ = api
+    client.headers.pop("Authorization")
+    ping = AsyncMock(side_effect=AssertionError("liveness must not touch the database"))
+    monkeypatch.setattr(repository, "ping_database", ping)
+
+    result = client.get("/")
+
+    assert result.status_code == 200
+    assert result.json() == {"status": "ok", "app_name": agentic.settings.app_name}
+    ping.assert_not_awaited()
+
+
+def test_health_is_public_and_reveals_no_counts(api):
+    client, _ = api
+    client.headers.pop("Authorization")
+
+    result = client.get("/agentic/health")
+
+    assert result.status_code == 200
+    assert result.json() == {
+        "status": "ok", "app_name": agentic.settings.app_name, "database": {"connected": True},
+    }
+
+
+async def _hangs_forever():
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("ping", [
+    AsyncMock(return_value=False),
+    AsyncMock(side_effect=OSError("connection refused")),
+    _hangs_forever,
+], ids=["no pool", "query fails", "hangs"])
+def test_health_reports_an_unreachable_database(api, monkeypatch, ping):
+    client, _ = api
+    client.headers.pop("Authorization")
+    monkeypatch.setattr(repository, "ping_database", ping)
+    monkeypatch.setattr(agentic, "HEALTH_DB_TIMEOUT_SECONDS", 0.01)
+
+    result = client.get("/agentic/health")
+
+    assert result.status_code == 200
+    assert result.json()["status"] == "degraded"
+    assert result.json()["database"] == {"connected": False}
 
 
 def test_prompt_with_known_user_is_answered_and_stored(api, fake_repo):
@@ -227,7 +275,7 @@ def test_generation_rejects_users_not_in_user_table(api, auth, path):
 
 
 @pytest.mark.parametrize("path", [
-    "/agentic/health", "/agentic/sessions", "/agentic/sessions/private-session/messages",
+    "/agentic/sessions", "/agentic/sessions/private-session/messages",
     "/agentic/users", "/agentic/admin/overview",
 ])
 def test_private_routes_still_require_auth(api, path):

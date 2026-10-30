@@ -30,3 +30,9 @@ app.include_router(agentic.router)
 app.include_router(sessions.router)
 app.include_router(documents.router)
 app.include_router(grief_notes.router)
+
+
+@app.get("/", tags=["Health"], summary="Public liveness check")
+async def liveness():
+    # Touches no database or Held API, so it answers whenever the process is up.
+    return {"status": "ok", "app_name": get_settings().app_name}

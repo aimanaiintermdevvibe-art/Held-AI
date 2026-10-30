@@ -145,6 +145,9 @@ class FakeRepo:
         self.messages.pop(session_id)
         return True
 
+    async def ping_database(self):
+        return True
+
     async def get_database_overview(self):
         return {"connected": True, "counts": {
             "users_count": len(self.users), "sessions_count": len(self.sessions),
@@ -164,7 +167,7 @@ def fake_repo(monkeypatch):
     for name in (
         "get_auth_user", "create_chat_session", "get_chat_session", "get_session_messages",
         "save_chat_message", "update_chat_session", "get_previous_conversations",
-        "list_chat_sessions", "delete_chat_session", "get_database_overview",
+        "list_chat_sessions", "delete_chat_session", "ping_database", "get_database_overview",
         "list_users", "get_user_by_id", "create_user_from_profile",
     ):
         monkeypatch.setattr(repository, name, getattr(repo, name))
