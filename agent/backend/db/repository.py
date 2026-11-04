@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from backend.db.connection import get_db_pool
@@ -72,8 +72,6 @@ def _message_dict(row: Any) -> Dict[str, Any]:
         "metadata": _json(row["metadata"]),
         "created_at": _iso(row["created_at"]),
     }
-    if "total_message_count" in row.keys():
-        message["total_message_count"] = int(row["total_message_count"] or 0)
     return message
 
 
@@ -154,33 +152,32 @@ async def get_chat_session(session_id: str, user_id: Optional[str] = None) -> Op
         return _session_dict(row) if row else None
 
 
-async def update_chat_session(
+async def save_session_summary(
     session_id: str,
-    title: Optional[str] = None,
-    session_summary: Optional[str] = None,
-    last_summarized_message_id: Optional[str] = None,
-) -> None:
-    """Set the AI-chosen title and/or the rolling summary with its anchor message."""
+    session_summary: str,
+    last_summarized_message_id: str,
+    previous_anchor: Optional[str] = None,
+) -> bool:
+    """Store a new rolling summary and its anchor message, unless another job already moved
+    the anchor on from previous_anchor. Returns whether it was stored."""
     pool = await get_db_pool()
     session_key = _uuid(session_id)
     if not pool or not session_key:
-        return
+        return False
 
     async with pool.acquire() as conn:
-        await conn.execute(
+        result = await conn.execute(
             """
             UPDATE public.chat_sessions
-            SET title = COALESCE($2, title),
-                session_summary = COALESCE($3, session_summary),
-                last_summarized_message_id = COALESCE($4, last_summarized_message_id),
-                updated_at = NOW()
-            WHERE id = $1;
+            SET session_summary = $2, last_summarized_message_id = $3
+            WHERE id = $1 AND last_summarized_message_id IS NOT DISTINCT FROM $4;
             """,
             session_key,
-            title,
             session_summary,
             _uuid(last_summarized_message_id),
+            _uuid(previous_anchor),
         )
+        return result == "UPDATE 1"
 
 
 async def delete_chat_session(session_id: str, user_id: Optional[str] = None) -> bool:
@@ -220,13 +217,85 @@ async def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
         return [_message_dict(r) for r in rows]
 
 
-async def save_chat_message(
-    session_id: str,
-    role: str,
-    content: str,
-    metadata: Optional[Dict[str, Any]] = None,
+def _memory_messages(value: Any) -> List[Dict[str, Any]]:
+    """json_agg'd messages (id, role, content, created_at), oldest first."""
+    return [
+        {"id": str(m["id"]), "role": m["role"], "content": m["content"], "created_at": m.get("created_at")}
+        for m in _json(value) or []
+    ]
+
+
+async def open_chat(
+    session_id: str, user_id: Optional[str] = None, recent: int = 20,
+) -> Optional[Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[str]]]:
+    """Everything a reply in an existing chat needs, in one query: the session (scoped to its
+    owner unless user_id is None), its latest `recent` messages oldest first, and the owner's
+    long-term memory (public.user_memory, migration 006). None when the session is not found."""
+    pool = await get_db_pool()
+    session_key = _uuid(session_id)
+    if not pool or not session_key:
+        return None
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            SELECT {SESSION_COLUMNS},
+                   (SELECT json_agg(json_build_object('id', m.id, 'role', m.role, 'content', m.content,
+                                                      'created_at', m.created_at)
+                                    ORDER BY m.created_at, m.id)
+                    FROM (SELECT id, role, content, created_at FROM public.chat_messages
+                          WHERE session_id = s.id
+                          ORDER BY created_at DESC, id DESC LIMIT $3) m) AS recent,
+                   (SELECT um.summary FROM public.user_memory um WHERE um.user_id = s.user_id) AS user_memory
+            FROM public.chat_sessions s
+            WHERE s.id = $1 AND ($2::text IS NULL OR s.user_id = $2);
+            """,
+            session_key,
+            user_id,
+            recent,
+        )
+        if not row:
+            return None
+        return _session_dict(row), _memory_messages(row["recent"]), row["user_memory"]
+
+
+async def get_messages_after(
+    session_id: str, anchor_id: Optional[str], limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Up to `limit` messages after the anchor message (from the start when there is none),
+    oldest first. Only needed when a summary has fallen behind the messages a turn loaded."""
+    pool = await get_db_pool()
+    session_key = _uuid(session_id)
+    if not pool or not session_key:
+        return []
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT m.id, m.role, m.content, m.created_at
+            FROM public.chat_messages m
+            WHERE m.session_id = $1
+              AND ($2::uuid IS NULL OR (m.created_at, m.id) > (
+                    SELECT a.created_at, a.id FROM public.chat_messages a WHERE a.id = $2))
+            ORDER BY m.created_at, m.id
+            LIMIT $3;
+            """,
+            session_key,
+            _uuid(anchor_id),
+            limit,
+        )
+        return [
+            {"id": str(r["id"]), "role": r["role"], "content": r["content"], "created_at": _iso(r["created_at"])}
+            for r in rows
+        ]
+
+
+async def save_turn(
+    session_id: str, prompt: str, response: str, title: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Insert a message and bump its session's total_message_count in one statement."""
+    """Store a turn in one statement: the user's message and the reply, the session's message
+    count, and (for a new chat) its title. Returns the two stored messages with the session's
+    new total_message_count, title and updated_at."""
     pool = await get_db_pool()
     session_key = _uuid(session_id)
     if not pool or not session_key:
@@ -236,23 +305,55 @@ async def save_chat_message(
         row = await conn.fetchrow(
             """
             WITH m AS (
-                INSERT INTO public.chat_messages (session_id, role, content, metadata)
-                VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb))
-                RETURNING id, session_id, role, content, metadata, created_at
+                -- One statement shares one NOW(); the reply is stamped just after the prompt
+                -- so the two always sort in order.
+                INSERT INTO public.chat_messages (session_id, role, content, created_at)
+                VALUES ($1, 'user', $2, NOW()), ($1, 'assistant', $3, NOW() + interval '1 microsecond')
+                RETURNING id, role, content, created_at
             ), s AS (
                 UPDATE public.chat_sessions
-                SET total_message_count = total_message_count + 1, updated_at = NOW()
+                SET total_message_count = total_message_count + 2, updated_at = NOW(),
+                    title = COALESCE($4, title)
                 WHERE id = $1
-                RETURNING total_message_count
+                RETURNING total_message_count, title, updated_at
             )
-            SELECT m.*, s.total_message_count FROM m, s;
+            SELECT (SELECT json_agg(json_build_object('id', m.id, 'role', m.role, 'content', m.content,
+                                                      'created_at', m.created_at)
+                                    ORDER BY m.created_at) FROM m) AS messages,
+                   s.total_message_count, s.title, s.updated_at
+            FROM s;
             """,
             session_key,
-            role,
-            content,
-            json.dumps(metadata) if metadata is not None else None,
+            prompt,
+            response,
+            title,
         )
-        return _message_dict(row) if row else None
+        if not row:
+            return None
+        return {
+            "messages": _memory_messages(row["messages"]),
+            "total_message_count": int(row["total_message_count"] or 0),
+            "title": row["title"],
+            "updated_at": _iso(row["updated_at"]),
+        }
+
+
+async def save_user_memory(user_id: str, summary: str) -> None:
+    """Store the user's long-term memory (public.user_memory, migration 006)."""
+    pool = await get_db_pool()
+    if not pool or not user_id:
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO public.user_memory (user_id, summary, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET summary = EXCLUDED.summary, updated_at = NOW();
+            """,
+            user_id,
+            summary,
+        )
 
 
 async def get_previous_conversations(
@@ -262,7 +363,8 @@ async def get_previous_conversations(
     recent_messages: int = 6,
     content_chars: int = 600,
 ) -> List[Dict[str, Any]]:
-    """Return the user's most recent other conversations for cross-session memory.
+    """Return the user's most recent other conversations for cross-session memory. Read for
+    a new chat's first reply only; later replies use the shorter user memory instead.
 
     Each item carries the session's rolling summary (when one exists), the user's
     last few messages there, and up to 50 of their messages in `user_messages` (so
@@ -282,7 +384,8 @@ async def get_previous_conversations(
                     FROM (SELECT role, content, created_at, id FROM public.chat_messages
                           WHERE session_id = s.id AND role = 'user'
                           ORDER BY created_at DESC, id DESC LIMIT $4) m) AS recent,
-                   (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, $5))
+                   (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, $5),
+                                                      'created_at', m.created_at)
                                     ORDER BY m.created_at, m.id)
                     FROM (SELECT role, content, created_at, id FROM public.chat_messages
                           WHERE session_id = s.id AND role = 'user'

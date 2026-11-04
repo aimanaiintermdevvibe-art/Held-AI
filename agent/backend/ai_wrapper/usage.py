@@ -1,3 +1,5 @@
+import logging
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -88,3 +90,39 @@ def record_usage(model: str, metadata: Any, duration_ms: float) -> None:
     tracker = _current_usage.get()
     if tracker is not None:
         tracker.record(model, metadata, duration_ms)
+
+
+@contextmanager
+def track_usage(tracker: UsageTracker):
+    """Record the Gemini calls made inside the block in tracker."""
+    token = begin_usage(tracker)
+    try:
+        yield tracker
+    finally:
+        end_usage(token)
+
+
+# One line per chat turn or background job: tokens, calls and estimated cost. Shown at INFO
+# level on the console (Render's log), like the auth log.
+usage_logger = logging.getLogger("held_ai.usage")
+usage_logger.setLevel(logging.INFO)
+if not usage_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    usage_logger.addHandler(_handler)
+usage_logger.propagate = False
+
+
+def log_usage(label: str, tracker: UsageTracker, **fields: Any) -> None:
+    """Log what tracker recorded, e.g. "usage turn session=... calls=4 input=5210 ...". Nothing
+    is logged when no Gemini call was made."""
+    usage = tracker.as_dict()
+    if not usage["request_count"]:
+        return
+    cost = usage["estimated_cost_usd"]
+    extra = " ".join(f"{key}={value}" for key, value in fields.items())
+    usage_logger.info(
+        "usage %s %s calls=%d input=%s output=%s thinking=%s cost_usd=%s ms=%d",
+        label, extra, usage["request_count"], usage["input_tokens"], usage["output_tokens"],
+        usage["thinking_tokens"], f"{cost:.5f}" if cost is not None else "unknown", usage["duration_ms"],
+    )

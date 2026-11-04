@@ -1,3 +1,8 @@
+import pytest
+
+# RAG disabled: remove this line when the commented-out code in main.py and agentic.py is restored.
+pytest.skip("RAG is disabled", allow_module_level=True)
+
 import asyncio
 import io
 import json
@@ -7,7 +12,6 @@ import time
 import zlib
 from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.routers import agentic
@@ -572,7 +576,7 @@ def test_embedding_outage_marks_the_document_failed_not_the_upload(client, monke
 
 @pytest.fixture
 def rag_chat(monkeypatch, client, doc_store, embedder):
-    provider = FakeProvider(route="CLINICAL_QUERY")
+    provider = FakeProvider(intent="CLINICAL_QUERY")
     monkeypatch.setattr(agentic, "pipeline", AgenticPipeline(provider, Settings(_env_file=None)))
     monkeypatch.setattr(agentic, "excerpts_for_chat", service.excerpts_for_chat)  # undo the conftest stub
     monkeypatch.setattr(agentic.settings, "rag_min_similarity", 0.15)  # the bag-of-words fake scores low

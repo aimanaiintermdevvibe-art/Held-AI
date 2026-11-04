@@ -245,7 +245,7 @@ def test_chat_uses_the_stored_copy_when_held_is_down(notes_store, held):
 
 
 def test_notes_reach_the_writer_and_the_auditor(fake_repo, auth, notes_store, held, monkeypatch):
-    provider = FakeProvider(route="GRIEF")
+    provider = FakeProvider(intent="GRIEF_WORKBOOK")
     monkeypatch.setattr(agentic, "pipeline", AgenticPipeline(provider, Settings(_env_file=None)))
     monkeypatch.setattr(agentic, "notes_for_chat", service.notes_for_chat)  # undo the conftest stub
     monkeypatch.setattr(agentic, "generate_title", AsyncMock(return_value="Title"))

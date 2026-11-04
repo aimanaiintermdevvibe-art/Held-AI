@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-IntentCategory = Literal["CLINICAL_QUERY", "GRIEF_WORKBOOK", "CRISIS", "OFF_TOPIC"]
+IntentCategory = Literal["CLINICAL_QUERY", "GENERAL_SUPPORT", "GRIEF_WORKBOOK", "CRISIS", "OFF_TOPIC"]
 
 class IntentDecision(BaseModel):
     category: IntentCategory

@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     agentic_run_timeout_seconds: float = Field(default=240, gt=0, le=600)
     agentic_stream_chunk_size: int = Field(default=24, gt=0, le=500)
     agentic_stream_delay_seconds: float = Field(default=0.03, ge=0.0, le=1.0)
-    memory_context_char_budget: int = Field(default=120_000, gt=0)
+    # Upper limit on one Gemini answer, thinking included. Replies use far less; it only stops
+    # a runaway answer from running up the bill.
+    gemini_max_output_tokens: int = Field(default=8192, ge=1024, le=65536)
 
     # Uploaded documents and retrieval (RAG). Vectors are 768-dimensional (migration 002).
     embedding_model: str = "gemini-embedding-001"

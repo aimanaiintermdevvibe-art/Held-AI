@@ -13,6 +13,8 @@ The Held AI Agent API provides multi-agent AI support and persists conversations
 
 ## Summary of Endpoints
 
+> **RAG disabled:** the `/agentic/documents` endpoints and document search in chat are commented out in `agent/backend/main.py` and `agent/backend/api/routers/agentic.py`. Replies use the model's own DSM-5-TR knowledge, guided by the agent prompts, and no longer return `sources`. The code and the stored data remain, so restoring those lines brings RAG back.
+
 | Category | Method | Endpoint | Description |
 | :--- | :--- | :--- | :--- |
 | **Agent** | `POST` | `/agentic/stream` | Progressive Server-Sent Events (SSE) stream (with automatic session creation & details) |
@@ -40,7 +42,7 @@ The Held AI Agent API provides multi-agent AI support and persists conversations
 | **Grief notes** | `PATCH` | `/agentic/grief-notes/{date}` | Edit content/mood (Held) or exercise (agent)
 | **Admin** | `GET` | `/agentic/admin/overview` | Database summary entity counts |
 
-> **Configuration Note**: `DATABASE_URL` and `JWT_SECRET` are read from the local `.env` or the deployment environment. The agent writes to `chat_sessions`, `chat_messages`, `documents` and `document_chunks` (pgvector, migration 002), and adds `User` rows for Held users it has not seen before; it does not create tables (see `agent/migrations/001_user_and_chat_tables.sql`). If the Supabase direct host is unreachable (it is IPv6-only), set `DATABASE_POOLER_URL` to the IPv4 session pooler URL. `MEMORY_CONTEXT_CHAR_BUDGET` (default `120000`) sets how much history is sent verbatim to the agents. Summarisation fires once **10 messages** (user + assistant combined) have built up after the last summary, and runs in a background queue — the user is never delayed. The configured LAN database must be reachable from the machine running the agent.
+> **Configuration Note**: `DATABASE_URL` and `JWT_SECRET` are read from the local `.env` or the deployment environment. The agent writes to `chat_sessions`, `chat_messages`, `documents` and `document_chunks` (pgvector, migration 002), and adds `User` rows for Held users it has not seen before; it does not create tables (see `agent/migrations/001_user_and_chat_tables.sql`). If the Supabase direct host is unreachable (it is IPv6-only), set `DATABASE_POOLER_URL` to the IPv4 session pooler URL. Each reply sends the chat's latest 20 messages, plus its rolling summary once the chat is longer, and a short user memory (`public.user_memory`, migration 006) of the user's other chats. Summarisation fires once **10 messages** (user + assistant combined) have built up after the last summary, and runs in a background queue — the user is never delayed. The configured LAN database must be reachable from the machine running the agent.
 
 ## Authentication
 
@@ -445,9 +447,12 @@ Standard HTTP status codes are returned for error conditions:
 ### How memory is loaded
 
 - **Requires** a valid token for a user in `public."User"`; send the `session_id` returned by the first turn to continue a conversation. Ownership comes from the token; a `user_id` in the body is never used.
-- **Before generation**: the server confirms the session belongs to the caller (admins excepted), loads its `chat_messages` rows in order, adds short recaps (summary + the user's last 6 messages) of the user's 10 most recent other conversations as `previous_conversations`, and passes them to the agents as context — not as instructions. New conversations also receive these recaps, so the agent remembers the user across chats.
-  - If all messages fit within `MEMORY_CONTEXT_CHAR_BUDGET` (default 120 000 chars), the full verbatim history is sent.
-  - If history exceeds the budget, the agents receive `chat_sessions.session_summary` plus every message after `last_summarized_message_id` (at most the latest 20 prompt/answer pairs).
+- **Before generation (existing conversation)**: one query confirms the session belongs to the caller (admins excepted) and loads its latest 20 `chat_messages` rows in order, together with the user memory (`user_memory.summary`). The agents receive these as context — not as instructions:
+  - the latest 20 messages verbatim (a message over 4,000 characters keeps its first and last 2,000);
+  - `chat_sessions.session_summary`, once the conversation has more than 20 messages;
+  - `earlier_conversations`: the user memory, a short summary of the user's other recent conversations.
+- **Before generation (new conversation)**: short recaps (summary + the user's last 6 messages) of the user's 10 most recent other conversations are loaded as `previous_conversations`, so the agent remembers the user across chats. After the reply, a background job condenses these recaps into the user memory (at most 150 words, with no mention of suicide, self-harm or thoughts of dying) for the conversation's later replies.
+- **Per agent**: Agent 1 (routing) gets the summary, the user's own messages among the latest 20 and the last 6 messages in full, Agent 2 the summary and the last 10, Agent 3 everything, and Agent 4 everything except the assistant's own earlier replies. Agents 1 and 2 never see other conversations.
 
 ### 10-message threshold summarisation
 
@@ -455,11 +460,11 @@ Summarisation is **anchor-based**: it counts messages stored after `last_summari
 
 | Step | What happens |
 | :--- | :--- |
-| Each turn saved | The user message and assistant reply are inserted into `chat_messages`; each insert increments `total_message_count` in the same statement. |
-| After each turn | A summarisation job is placed on an in-process `asyncio.Queue`. The user response has already been sent — they are never blocked. |
-| Consumer (idle) | A background worker re-reads the session and its messages and counts those after `last_summarized_message_id`. |
-| ≥ 10 new messages | An LLM call merges them into the previous summary (≤ 250 words). The result is written to `chat_sessions.session_summary` and `last_summarized_message_id` is set to the newest summarised message. |
-| Threshold not met | Job is discarded; no database write. |
+| Each turn saved | One statement inserts the user message and the assistant reply into `chat_messages`, adds 2 to `total_message_count` and, for a new conversation, sets the AI-generated title. |
+| After each turn | The turn already holds the latest messages, so it counts those after `last_summarized_message_id` without a database read. Only when 10 or more are waiting is a summarisation job placed on an in-process `asyncio.Queue`. The user response has already been sent — they are never blocked. |
+| Consumer (idle) | A background worker re-reads only the session row, in case another job summarised meanwhile, and reads messages only if the summary has fallen behind the ones the turn held. |
+| ≥ 10 new messages | An LLM call merges them into the previous summary (≤ 250 words, in labelled parts: Facts, Feelings and goals, Already suggested). The result is written to `chat_sessions.session_summary` and `last_summarized_message_id` is set to the newest summarised message. |
+| Threshold not met | No job is queued; no database read or write. |
 
 ```
 Example timeline (messages = user + assistant counted together):
@@ -484,6 +489,7 @@ Example timeline (messages = user + assistant counted together):
 | Message count | `chat_sessions.total_message_count` |
 | Client-supplied metadata | `chat_sessions.metadata` (nothing server-owned is stored here) |
 | Each prompt / answer | `chat_messages.role`, `content`, `created_at` |
+| User memory (other conversations) | `user_memory.summary`, one row per user |
 
 ### Session title
 

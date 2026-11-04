@@ -1,6 +1,6 @@
 import pytest
 
-from backend.ai_wrapper.agents.agent3_empathy_synthesizer.openings import has_mirroring_opening
+from backend.ai_wrapper.agents.agent3_empathy_synthesizer.openings import has_mirroring_opening, has_stock_opening
 
 ECHOES = [
     "It sounds like you're carrying a lot right now.",
@@ -34,11 +34,52 @@ NATURAL = [
 ]
 
 
+SPECIFIC = [
+    "Four nights in a row, straight after covering extra hours: no wonder you're dreading it.",
+    "Twelve years with Max. No wonder the house feels so quiet.",
+    "Getting the speech to sound like you is the hard part, and it's fixable.",
+    "Your sister's wedding is on 14 December.",
+    "Losing someone this way leaves a lot of questions, and you don't have to answer any of them today.",
+    "Here's a gentle way to start tonight.",
+    "Snapping at Tom after a night shift doesn't make you a bad partner.",
+    "Depression is usually diagnosed when symptoms last at least two weeks.",
+]
+
+
 @pytest.mark.parametrize("text", ECHOES)
 def test_echoing_or_impersonal_openings_are_flagged(text):
     assert has_mirroring_opening(text)
 
 
-@pytest.mark.parametrize("text", NATURAL)
+@pytest.mark.parametrize("text", NATURAL + SPECIFIC)
 def test_warm_personal_openings_pass(text):
     assert not has_mirroring_opening(text)
+
+
+STOCK = [
+    "I'm so sorry to hear about your grandmother.",
+    "I'm really glad you told me.",
+    "I am truly sorry you're going through this.",
+    "**I'm so glad** you reached out.",
+    "Thank you for sharing this with me.",
+    "Thanks for telling me.",
+    "I completely understand how heavy that is.",
+    "I hear you, and that matters.",
+    "I'm here with you.",
+    "I can only imagine how hard that is.",
+    "You're not alone in this.",
+    "That's so hard.",
+    "Oh, I'm so sorry.",
+    "What a lot to carry.",
+]
+
+
+
+@pytest.mark.parametrize("text", STOCK)
+def test_stock_sympathy_openings_are_flagged(text):
+    assert has_stock_opening(text)
+
+
+@pytest.mark.parametrize("text", SPECIFIC + ECHOES)
+def test_specific_openings_are_not_stock(text):
+    assert not has_stock_opening(text)

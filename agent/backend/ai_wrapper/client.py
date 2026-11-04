@@ -1,6 +1,8 @@
+import asyncio
 import logging
+import random
 import re
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from time import perf_counter
 
 from pydantic import BaseModel
@@ -11,8 +13,13 @@ if TYPE_CHECKING:
     from backend.core.config import Settings
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+ParsedT = TypeVar("ParsedT")
 
 logger = logging.getLogger("held_ai.gemini")
+
+
+class _NoOutput(Exception):
+    """Gemini answered, but with nothing usable (empty, malformed or unparseable)."""
 
 class ProviderBusyError(RuntimeError):
     """Gemini rejected the request for quota/rate limits (HTTP 429)."""
@@ -20,6 +27,29 @@ class ProviderBusyError(RuntimeError):
     def __init__(self, retry_after: int | None = None) -> None:
         super().__init__("Gemini rate limit reached")
         self.retry_after = retry_after
+
+# Server-side and network failures that usually pass within seconds (for example Gemini's
+# 503 "model overloaded"). Bad requests, auth errors and rate limits are not retried.
+_TRANSIENT_STATUS = {408, 500, 502, 503, 504}
+
+
+def _status(error: Exception) -> int | None:
+    code = getattr(error, "code", None)
+    return code if isinstance(code, int) else None
+
+
+def _is_transient(error: Exception) -> bool:
+    status = _status(error)
+    if status is not None:
+        return status in _TRANSIENT_STATUS
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx ships with google-genai
+        httpx = None
+    if httpx is not None and isinstance(error, httpx.TransportError):
+        return True  # timeouts, dropped connections
+    return isinstance(error, (TimeoutError, ConnectionError))
+
 
 def _provider_failure(message: str, error: Exception | None) -> RuntimeError:
     """Log the real provider error and map rate limits to ProviderBusyError."""
@@ -29,6 +59,13 @@ def _provider_failure(message: str, error: Exception | None) -> RuntimeError:
         return ProviderBusyError(int(delay.group(1)) if delay else None)
     return RuntimeError(message)
 
+
+def _finish_reason(response: Any) -> str | None:
+    candidates = getattr(response, "candidates", None) or []
+    reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+    return getattr(reason, "name", None) or (str(reason) if reason else None)
+
+
 class GeminiClient:
     """Lazy async wrapper around Google's native Gemini API SDK."""
 
@@ -37,6 +74,12 @@ class GeminiClient:
     # the browser waiting for many minutes, so each candidate gets one bounded
     # transport attempt.
     MAX_REQUEST_TIMEOUT_SECONDS = 45.0
+    # A request that fails for a passing reason (a 5xx such as "model overloaded", a timeout)
+    # is tried again after a short pause, at most MAX_ATTEMPTS times in all, with low thinking
+    # from the second attempt on and finally the shared key, when the agent has its own. A rate
+    # limit is tried again only with another key; other errors are not tried again.
+    MAX_ATTEMPTS = 3
+    RETRY_DELAYS_SECONDS = (0.5, 1.5)
 
     def __init__(self, settings: "Settings") -> None:
         self.settings = settings
@@ -69,23 +112,80 @@ class GeminiClient:
             )
         return self._clients[resolved_key]
 
-    def _request_candidates(
+    def _attempts(self, *, api_key: str | None, thinking_level: str) -> list[tuple[str | None, str]]:
+        """(api key, thinking level) for each attempt: as asked first, then low thinking, then
+        the shared key, repeating the last one to make up MAX_ATTEMPTS."""
+        shared_key = self.settings.gemini_api_key or None
+        own_key = api_key or shared_key
+        plan = list(dict.fromkeys([(own_key, thinking_level), (own_key, "low"), (shared_key or own_key, "low")]))
+        plan += [plan[-1]] * (self.MAX_ATTEMPTS - len(plan))
+        return plan[:self.MAX_ATTEMPTS]
+
+    async def _generate(
         self,
         *,
-        api_key: str | None,
+        label: str,
+        model: str,
+        system: str,
+        user_input: str,
         thinking_level: str,
-    ) -> list[tuple[str | None, str]]:
-        """Return primary, low-thinking, and shared-key request candidates."""
-        candidates = [(api_key, thinking_level)]
-        same_key_low = (api_key, "low")
-        if same_key_low != candidates[0]:
-            candidates.append(same_key_low)
-        shared_key = self.settings.gemini_api_key or None
-        fallback = (shared_key or api_key, "low")
-        if fallback != candidates[0]:
-            if fallback not in candidates:
-                candidates.append(fallback)
-        return candidates
+        api_key: str | None,
+        response_model: type[BaseModel] | None = None,
+        parse: Callable[[Any], ParsedT],
+    ) -> ParsedT:
+        """One generate_content call, tried again on a transient failure, with each attempt's
+        token use recorded. A rate limit is tried again only with a different key. parse turns
+        the response into the result, raising _NoOutput when it is empty or unreadable (Gemini
+        sometimes answers with a malformed response); that is tried again too."""
+        attempts = self._attempts(api_key=api_key, thinking_level=thinking_level)
+        last_error: Exception | None = None
+        index: int | None = 0
+        retries = 0
+        while index is not None:
+            key, level = attempts[index]
+            later = range(index + 1, len(attempts))
+            started = perf_counter()
+            try:
+                client = self._get_client(key)
+                response = await client.aio.models.generate_content(
+                    model=model,
+                    contents=user_input,
+                    config=self._config(
+                        system=system,
+                        thinking_level=level,
+                        response_model=response_model,
+                        max_output_tokens=self.settings.gemini_max_output_tokens,
+                    ),
+                )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if _status(exc) == 429:  # only another key can help
+                    index = next((i for i in later if attempts[i][0] != key), None)
+                elif _is_transient(exc):
+                    index = later[0] if later else None
+                else:
+                    index = None
+                if index is None:
+                    raise _provider_failure(f"{label} request failed", exc) from exc
+                reason = _status(exc) or type(exc).__name__
+            else:
+                record_usage(model, getattr(response, "usage_metadata", None), (perf_counter() - started) * 1000)
+                finish = _finish_reason(response)
+                if finish == "MAX_TOKENS":
+                    logger.warning("%s stopped at the %s-token output limit", label, self.settings.gemini_max_output_tokens)
+                try:
+                    return parse(response)
+                except _NoOutput as exc:
+                    if not later:
+                        raise RuntimeError(str(exc)) from exc
+                    index, reason = later[0], f"{exc}, finish reason {finish}"
+            logger.warning("%s failed (%s); trying again", label, reason)
+            delay = self.RETRY_DELAYS_SECONDS[min(retries, len(self.RETRY_DELAYS_SECONDS) - 1)]
+            retries += 1
+            await asyncio.sleep(delay * (0.75 + random.random() / 2))
+        raise _provider_failure(f"{label} request failed", last_error)  # pragma: no cover - loop returns or raises
 
     @staticmethod
     def _config(
@@ -93,6 +193,7 @@ class GeminiClient:
         system: str,
         thinking_level: str,
         response_model: type[BaseModel] | None = None,
+        max_output_tokens: int | None = None,
     ) -> Any:
         from google.genai import types
 
@@ -102,6 +203,9 @@ class GeminiClient:
                 thinking_level=thinking_level.upper()
             ),
         }
+        if max_output_tokens:
+            # Thinking counts toward this limit too; it only stops a runaway reply.
+            values["max_output_tokens"] = max_output_tokens
         if response_model is not None:
             # The SDK's response_schema dialect rejects additionalProperties.
             # Keep strict extra-field validation in Pydantic after generation.
@@ -128,50 +232,27 @@ class GeminiClient:
         thinking_level: str,
         api_key: str | None = None,
     ) -> ModelT:
-        async def request(
-            resolved_api_key: str | None,
-            resolved_thinking_level: str,
-        ) -> Any:
-            client = self._get_client(resolved_api_key)
-            return await client.aio.models.generate_content(
-                model=model,
-                contents=user_input,
-                config=self._config(
-                    system=system,
-                    thinking_level=resolved_thinking_level,
-                    response_model=response_model,
-                ),
-            )
-
-        last_error: Exception | None = None
-        request_started = perf_counter()
-        for resolved_key, resolved_thinking_level in self._request_candidates(
-            api_key=api_key,
-            thinking_level=thinking_level,
-        ):
+        def parse(response: Any) -> ModelT:
+            if isinstance(response.parsed, response_model):
+                return response.parsed
+            text = (response.text or "").strip()
+            if not text:
+                raise _NoOutput("Gemini returned no structured output")
             try:
-                response = await request(resolved_key, resolved_thinking_level)
-                break
-            except RuntimeError:
-                raise
-            except Exception as exc:
-                last_error = exc
-        else:
-            raise _provider_failure("Gemini structured response request failed", last_error) from last_error
-        record_usage(
-            model,
-            getattr(response, "usage_metadata", None),
-            (perf_counter() - request_started) * 1000,
+                return response_model.model_validate_json(text)
+            except ValueError as exc:
+                raise _NoOutput("Gemini returned invalid structured output") from exc
+
+        return await self._generate(
+            label="Gemini structured response",
+            model=model,
+            system=system,
+            user_input=user_input,
+            thinking_level=thinking_level,
+            api_key=api_key,
+            response_model=response_model,
+            parse=parse,
         )
-        if isinstance(response.parsed, response_model):
-            return response.parsed
-        text = (response.text or "").strip()
-        if not text:
-            raise RuntimeError("Gemini returned no structured output")
-        try:
-            return response_model.model_validate_json(text)
-        except ValueError as exc:
-            raise RuntimeError("Gemini returned invalid structured output") from exc
 
     async def generate_text(
         self,
@@ -185,44 +266,21 @@ class GeminiClient:
     ) -> str:
         del verbosity
 
-        async def request(
-            resolved_api_key: str | None,
-            resolved_thinking_level: str,
-        ) -> Any:
-            client = self._get_client(resolved_api_key)
-            return await client.aio.models.generate_content(
-                model=model,
-                contents=user_input,
-                config=self._config(
-                    system=system,
-                    thinking_level=resolved_thinking_level,
-                ),
-            )
+        def parse(response: Any) -> str:
+            text = (response.text or "").strip()
+            if not text:
+                raise _NoOutput("Gemini returned an empty response")
+            return text
 
-        last_error: Exception | None = None
-        request_started = perf_counter()
-        for resolved_key, resolved_thinking_level in self._request_candidates(
-            api_key=api_key,
+        return await self._generate(
+            label="Gemini text response",
+            model=model,
+            system=system,
+            user_input=user_input,
             thinking_level=thinking_level,
-        ):
-            try:
-                response = await request(resolved_key, resolved_thinking_level)
-                break
-            except RuntimeError:
-                raise
-            except Exception as exc:
-                last_error = exc
-        else:
-            raise _provider_failure("Gemini text response request failed", last_error) from last_error
-        record_usage(
-            model,
-            getattr(response, "usage_metadata", None),
-            (perf_counter() - request_started) * 1000,
+            api_key=api_key,
+            parse=parse,
         )
-        text = (response.text or "").strip()
-        if not text:
-            raise RuntimeError("Gemini returned an empty response")
-        return text
 
     EMBED_BATCH_SIZE = 100  # Gemini's limit for texts in one embedding request
 

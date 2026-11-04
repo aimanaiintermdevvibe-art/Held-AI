@@ -10,14 +10,16 @@ The agents provide mental-health education, caregiving and grief support:
 3. **Empathy & Persona Synthesizer** writes the response.
 4. **Safety & Compliance Auditor** reviews the response before it is returned.
 
-A supervisor selects the route. Simple support can skip clinical reasoning;
-crisis requests take priority. Responses provide support and education, not diagnoses.
+Agent 1 also picks the route in the same call. General support and off-topic questions
+skip clinical reasoning; crisis requests take priority. Responses provide support and education, not diagnoses.
 
 Users sign in with their Held account; conversations are stored in PostgreSQL and
 remembered across turns and chats. Users can upload documents, and replies draw on the
 relevant passages (RAG, below). There is no website or grief notes/calendar.
 
 ## Uploaded documents (RAG)
+
+> **RAG disabled:** the `/agentic/documents` endpoints and document search in chat are commented out in `agent/backend/main.py` and `agent/backend/api/routers/agentic.py`. Replies use the model's own DSM-5-TR knowledge, guided by the agent prompts, and no longer return `sources`. The code and the stored data remain, so restoring those lines brings RAG back.
 
 Documents are stored in Supabase with pgvector (migration
 [002_documents_pgvector.sql](agent/migrations/002_documents_pgvector.sql), applied with
@@ -52,14 +54,14 @@ Documents are private to the user who uploaded them; `GET /agentic/documents`,
 `agent/scripts/rag_smoke_test.py` runs the whole flow against a running server and deletes
 what it created; see `logs/rag_pgvector_setup_and_test.log`.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `EMBEDDING_MODEL` | `gemini-embedding-001` | Must produce 768-dimensional vectors |
-| `RAG_TOP_K` | `5` | Passages considered per chat message |
-| `RAG_MIN_SIMILARITY` | `0.55` | Minimum cosine similarity for a passage to be used in chat |
-| `DOCUMENT_MAX_BYTES` / `DOCUMENT_MAX_CHUNKS` | 50 MB / `0` (no limit) | Upload limits |
-| `EMBEDDING_BATCH_SIZE` | `100` | Chunks per embedding request (Gemini's maximum) |
-| `DOCUMENT_CHUNK_CHARS` / `DOCUMENT_CHUNK_OVERLAP` | `800` / `150` | Chunk size and overlap |
+| Variable                                          | Default                | Purpose                                                    |
+| ------------------------------------------------- | ---------------------- | ---------------------------------------------------------- |
+| `EMBEDDING_MODEL`                                 | `gemini-embedding-001` | Must produce 768-dimensional vectors                       |
+| `RAG_TOP_K`                                       | `5`                    | Passages considered per chat message                       |
+| `RAG_MIN_SIMILARITY`                              | `0.55`                 | Minimum cosine similarity for a passage to be used in chat |
+| `DOCUMENT_MAX_BYTES` / `DOCUMENT_MAX_CHUNKS`      | 50 MB / `0` (no limit) | Upload limits                                              |
+| `EMBEDDING_BATCH_SIZE`                            | `100`                  | Chunks per embedding request (Gemini's maximum)            |
+| `DOCUMENT_CHUNK_CHARS` / `DOCUMENT_CHUNK_OVERLAP` | `800` / `150`          | Chunk size and overlap                                     |
 
 ### Testing in Postman
 
@@ -77,15 +79,15 @@ sees in `public.grief_notes` (migration [005_grief_notes.sql](agent/migrations/0
 with the guided workbook exercise the note answers (kept by the agent only). Moods are seeded into
 `public."Mood"` by `python agent/scripts/seed_moods.py`.
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/agentic/grief-notes/exercises` | Guided workbook exercises (key, title, prompt) |
-| `GET` | `/agentic/grief-notes/moods` | Moods a note can carry |
-| `POST` | `/agentic/grief-notes/sync` | Store all of the user's existing Held notes |
-| `GET` | `/agentic/grief-notes?page&limit&from&to` | Notes, newest first (synced from Held; stored copy if Held is down) |
-| `POST` | `/agentic/grief-notes` | `{"date", "content", "mood" or "moodId", "exercise"?}`; one per date (409) |
-| `GET` | `/agentic/grief-notes/{date}` | One note |
-| `PATCH` | `/agentic/grief-notes/{date}` | `content` / `mood` (saved to Held) and/or `exercise` (null clears it) |
+| Method  | Endpoint                                  | Purpose                                                                    |
+| ------- | ----------------------------------------- | -------------------------------------------------------------------------- |
+| `GET`   | `/agentic/grief-notes/exercises`          | Guided workbook exercises (key, title, prompt)                             |
+| `GET`   | `/agentic/grief-notes/moods`              | Moods a note can carry                                                     |
+| `POST`  | `/agentic/grief-notes/sync`               | Store all of the user's existing Held notes                                |
+| `GET`   | `/agentic/grief-notes?page&limit&from&to` | Notes, newest first (synced from Held; stored copy if Held is down)        |
+| `POST`  | `/agentic/grief-notes`                    | `{"date", "content", "mood" or "moodId", "exercise"?}`; one per date (409) |
+| `GET`   | `/agentic/grief-notes/{date}`             | One note                                                                   |
+| `PATCH` | `/agentic/grief-notes/{date}`             | `content` / `mood` (saved to Held) and/or `exercise` (null clears it)      |
 
 There is no delete: Held's API has none. In chat, a message that mentions the user's notes, journal,
 diary or workbook gets their 10 most recent notes as context (`grief_notes`) for the writer and the
@@ -103,9 +105,9 @@ nothing). `GET /agentic/diseases` lists it. A user's own conditions still come f
 
 Held onboarding asks two questions, which give four modes:
 
-| | Diagnosed | No diagnosis |
-| --- | --- | --- |
-| **Myself** | `myself_diagnosed` | `myself_undiagnosed` |
+|               | Diagnosed             | No diagnosis            |
+| ------------- | --------------------- | ----------------------- |
+| **Myself**    | `myself_diagnosed`    | `myself_undiagnosed`    |
 | **Caregiver** | `caregiver_diagnosed` | `caregiver_undiagnosed` |
 
 For a caregiver, onboarding also records who they care for (`relation`, or
@@ -125,7 +127,7 @@ agent/
   backend/
     main.py                 # FastAPI application
     api/routers/agentic.py   # Single POST endpoint
-    ai_wrapper/             # Gemini client, agents and supervisor
+    ai_wrapper/             # Gemini client, agents and memory
     core/config.py          # Environment settings
     schemas/agentic.py       # Prompt and response validation
   tests/                    # API and agent-flow tests
@@ -149,27 +151,28 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-Use a shared Gemini key, or configure all four per-agent keys. The supervisor uses
-Agent 1's configuration. Model defaults are retained from the original project;
+Use a shared Gemini key, or configure all four per-agent keys. Titles, chat summaries
+and the user memory use Agent 1's configuration. Model defaults are retained from the original project;
 set the model variables to models available to your provider account.
 
 Configuration is loaded from `agent/.env` or environment variables:
 
-| Variable | Purpose |
-| --- | --- |
-| `GEMINI_API_KEY` | Shared provider key |
-| `GEMINI_AGENT1_API_KEY` through `GEMINI_AGENT4_API_KEY` | Optional per-agent key overrides |
-| `GEMINI_AGENT1_MODEL` through `GEMINI_AGENT4_MODEL` | Model used by each agent |
-| `GEMINI_AGENT1_THINKING_LEVEL` through `GEMINI_AGENT4_THINKING_LEVEL` | Per-agent thinking settings |
-| `GEMINI_TIMEOUT_SECONDS` | Timeout per provider attempt; default and maximum: 45 seconds |
-| `AGENTIC_RUN_TIMEOUT_SECONDS` | Total request deadline; default: 240 seconds |
-| `AGENTIC_STREAM_CHUNK_SIZE` | Target character size per stream chunk; default: 24 |
-| `AGENTIC_STREAM_DELAY_SECONDS` | Release delay between SSE chunks; default: 0.03 seconds |
-| `DATABASE_URL` | Held PostgreSQL connection string |
-| `JWT_SECRET` | Server-side HS256 key for agent API tokens; required by the local development terminal client |
-| `AUTH_DISABLED` | Testing only. `true` accepts requests without a token, all as one shared guest user; default: `false` |
-| `HELD_API_BASE_URL` | Held API base URL (profiles for the server; sign-in, sign-up and onboarding for the terminal client) |
-| `HELD_ACTIVE_USER` | Terminal client account: `1` uses `users/user1.json`, `2` uses `users/user2.json` |
+| Variable                                                              | Purpose                                                                                               |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY`                                                      | Shared provider key                                                                                   |
+| `GEMINI_AGENT1_API_KEY` through `GEMINI_AGENT4_API_KEY`               | Optional per-agent key overrides                                                                      |
+| `GEMINI_AGENT1_MODEL` through `GEMINI_AGENT4_MODEL`                   | Model used by each agent                                                                              |
+| `GEMINI_AGENT1_THINKING_LEVEL` through `GEMINI_AGENT4_THINKING_LEVEL` | Per-agent thinking settings                                                                           |
+| `GEMINI_TIMEOUT_SECONDS`                                              | Timeout per provider attempt; default and maximum: 45 seconds                                         |
+| `AGENTIC_RUN_TIMEOUT_SECONDS`                                         | Total request deadline; default: 240 seconds                                                          |
+| `GEMINI_MAX_OUTPUT_TOKENS`                                            | Upper limit per AI call, thinking included; default: 8192                                             |
+| `AGENTIC_STREAM_CHUNK_SIZE`                                           | Target character size per stream chunk; default: 24                                                   |
+| `AGENTIC_STREAM_DELAY_SECONDS`                                        | Release delay between SSE chunks; default: 0.03 seconds                                               |
+| `DATABASE_URL`                                                        | Held PostgreSQL connection string                                                                     |
+| `JWT_SECRET`                                                          | Server-side HS256 key for agent API tokens; required by the local development terminal client         |
+| `AUTH_DISABLED`                                                       | Testing only. `true` accepts requests without a token, all as one shared guest user; default: `false` |
+| `HELD_API_BASE_URL`                                                   | Held API base URL (profiles for the server; sign-in, sign-up and onboarding for the terminal client)  |
+| `HELD_ACTIVE_USER`                                                    | Terminal client account: `1` uses `users/user1.json`, `2` uses `users/user2.json`                     |
 
 ### Authentication and user registration
 
@@ -198,10 +201,10 @@ and remove the variable when testing ends.
 
 The terminal client does no login or registration. Each test account has its own file:
 
-| `HELD_ACTIVE_USER` | File | Account |
-| --- | --- | --- |
-| `1` | `users/user1.json` | hashirflutter.devvibe@gmail.com |
-| `2` | `users/user2.json` | princejack66.pj@gmail.com |
+| `HELD_ACTIVE_USER` | File               | Account                         |
+| ------------------ | ------------------ | ------------------------------- |
+| `1`                | `users/user1.json` | hashirflutter.devvibe@gmail.com |
+| `2`                | `users/user2.json` | princejack66.pj@gmail.com       |
 
 A file holds the account's email and password, the Held API URL, its current token pair
 and a copy of its last Held profile (see `users/user.example.json`). To switch user, set
@@ -350,11 +353,6 @@ Project3-Held-AI---Chatbot-main
 │  │  │  ├─ contracts.py
 │  │  │  ├─ memory.py
 │  │  │  ├─ orchestrator.py
-│  │  │  ├─ supervisor
-│  │  │  │  ├─ agent.py
-│  │  │  │  ├─ prompt.py
-│  │  │  │  ├─ schemas.py
-│  │  │  │  └─ __init__.py
 │  │  │  ├─ usage.py
 │  │  │  └─ __init__.py
 │  │  ├─ api

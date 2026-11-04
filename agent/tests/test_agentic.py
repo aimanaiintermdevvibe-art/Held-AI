@@ -14,7 +14,6 @@ from backend.ai_wrapper.orchestrator import (
     SAFE_RESPONSE,
     AgenticPipeline,
 )
-from backend.ai_wrapper.supervisor.schemas import ExecutionPlan
 from backend.core.auth import GUEST_PROFILE
 from backend.core.config import Settings, get_settings
 from backend.db import repository
@@ -22,8 +21,7 @@ from backend.main import app
 
 
 class FakeProvider:
-    def __init__(self, *, route="GENERAL_SUPPORT", intent="CLINICAL_QUERY", fail=False, compliant=True):
-        self.route = route
+    def __init__(self, *, intent="GENERAL_SUPPORT", fail=False, compliant=True):
         self.intent = intent
         self.fail = fail
         self.compliant = compliant
@@ -40,8 +38,6 @@ class FakeProvider:
             raise RuntimeError("sensitive provider failure")
         if response_model is IntentDecision:
             return IntentDecision(category=self.intent, reasoning="Routing")
-        if response_model is ExecutionPlan:
-            return ExecutionPlan(intent=self.route)
         if response_model is ClinicalAnalysis:
             return ClinicalAnalysis(
                 analysis_mode="clinical_support", matched_criteria=[],
@@ -133,6 +129,7 @@ def test_allowed_routes():
 @pytest.mark.parametrize("path", [
     "/health", "/docs", "/redoc", "/openapi.json", "/auth/me",
     "/agentic/capabilities", "/agentic/conversations", "/agentic/grief-calendar/entries",
+    "/agentic/documents", "/agentic/documents/any-id",  # RAG disabled
 ])
 def test_removed_endpoints(api, path):
     client, _ = api
@@ -222,7 +219,7 @@ def test_generation_fetches_profile_with_the_callers_own_token(api, auth, profil
 
 def test_user_mode_reaches_reasoning_writing_and_review(api):
     client, provider = api
-    provider.route = "CLINICAL_QUERY"
+    provider.intent = "CLINICAL_QUERY"
     assert client.post("/agentic/run", json={"prompt": "How do I help with her low moods?"}).status_code == 200
 
     inputs = {model: json.loads(text) for model, text in provider.structured_inputs if model in (
@@ -366,11 +363,101 @@ def test_disabled_auth_reports_an_unavailable_database(guest_api, monkeypatch):
     assert result.json() == {"detail": "The guest user is unavailable."}
 
 
+def test_a_repeated_safety_question_is_rewritten_once(api):
+    client, provider = api
+    provider.drafts = ["Are you safe right now?", "Work sounds exhausting."]
+    sid = client.post("/agentic/run", json={"prompt": "I'm stressed."}).json()["session_id"]
+    assert client.post("/agentic/run", json={"prompt": "Are you safe?", "session_id": sid}).status_code == 200
+
+    provider.drafts = ["Are you safe right now?", "Work sounds exhausting."]
+    result = client.post("/agentic/run", json={"prompt": "Work was hard.", "session_id": sid})
+
+    assert result.json()["response"] == "Work sounds exhausting. [audited]"
+    assert "already asked about the user's safety" in provider.payloads[-1]["revision_feedback"][0]
+
+
+def test_chat_replies_have_no_document_sources(api):
+    client, provider = api
+    result = client.post("/agentic/run", json={"prompt": "I feel anxious."})
+    assert result.status_code == 200
+    assert "sources" not in result.json()
+    assert "document_excerpts" not in provider.payloads[-1]
+
+
+def test_agents_use_dsm_knowledge_for_laypeople_and_never_apply_it_to_the_user():
+    from backend.ai_wrapper.agents.agent2_clinical_reasoner.prompt import GRIEF_SYSTEM_PROMPT, SYSTEM_PROMPT as REASONING
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT as WRITING
+    from backend.ai_wrapper.agents.agent4_compliance_auditor.prompt import SYSTEM_PROMPT as AUDIT
+
+    assert "knowledge of the DSM-5-TR" in REASONING
+    assert "Never mention DSM" in GRIEF_SYSTEM_PROMPT
+    assert "Write for a layperson" in WRITING
+    assert "Never give page numbers" in WRITING
+    assert "Never apply it to this user" in WRITING
+    assert "applying diagnostic criteria to the user" in AUDIT
+    assert "Factual questions:" in WRITING and "no follow-up question" in WRITING
+
+
+def test_auditor_accepts_dsm_education_without_a_source(api):
+    client, provider = api
+    provider.system_prompts.clear()
+    audit_prompts = []
+    original = provider.generate_structured
+
+    async def recording(*, response_model, user_input, **kwargs):
+        if response_model is AuditDecision:
+            audit_prompts.append(kwargs["system"])
+        return await original(response_model=response_model, user_input=user_input, **kwargs)
+
+    provider.generate_structured = recording
+    assert client.post("/agentic/run", json={"prompt": "I feel anxious."}).status_code == 200
+    assert "allowed without a source" in audit_prompts[-1]
+    assert "reject unsupported DSM claims" not in audit_prompts[-1]
+
+
 def test_reasoning_route(api):
     client, provider = api
-    provider.route = "CLINICAL_QUERY"
+    provider.intent = "CLINICAL_QUERY"
     assert client.post("/agentic/run", json={"prompt": "I feel anxious."}).status_code == 200
-    assert provider.calls == [IntentDecision, ExecutionPlan, ClinicalAnalysis, "synthesis", AuditDecision]
+    assert provider.calls == [IntentDecision, ClinicalAnalysis, "synthesis", AuditDecision]
+    assert provider.payloads[-1]["mode"] == "clinical_support"
+
+
+def test_general_support_needs_no_reasoning(api):
+    client, provider = api
+    assert client.post("/agentic/run", json={"prompt": "I had a rough day."}).status_code == 200
+    # One routing call: the router also tells general support from clinical questions.
+    assert provider.calls == [IntentDecision, "synthesis", AuditDecision]
+    assert provider.payloads[-1]["mode"] == "general_support"
+
+
+def test_each_agent_gets_only_the_memory_it_needs():
+    from backend.ai_wrapper.memory import build_context
+
+    provider = FakeProvider(intent="CLINICAL_QUERY")
+    pipeline = AgenticPipeline(provider, Settings(_env_file=None))
+    history = [
+        {"id": f"m{i}", "role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+        for i in range(40)
+    ]
+    memory = build_context(history[-20:], {"session_summary": "Older turns.", "total_message_count": 40},
+                           earlier="They have a cat called Marigold.")
+    asyncio.run(pipeline.run(prompt="Is this anxiety?", memory=memory))
+
+    seen = {model: json.loads(text)["conversation_memory"] for model, text in provider.structured_inputs}
+    # The router: the user's earlier messages in the window, then the last 6 messages in full.
+    assert [m["content"] for m in seen[IntentDecision]["recent_messages"]] == (
+        [f"turn {i}" for i in range(20, 34, 2)] + [f"turn {i}" for i in range(34, 40)]
+    )
+    assert len(seen[ClinicalAnalysis]["recent_messages"]) == 10
+    for model in (IntentDecision, ClinicalAnalysis):
+        assert seen[model]["summary"] == "Older turns."
+        assert "earlier_conversations" not in seen[model]  # routing never sees other chats
+    # The writer gets everything; the auditor the same without the assistant's own replies.
+    assert provider.payloads[-1]["conversation_memory"] == memory
+    assert {m["role"] for m in seen[AuditDecision]["recent_messages"]} == {"user"}
+    assert len(seen[AuditDecision]["recent_messages"]) == 10
+    assert seen[AuditDecision]["earlier_conversations"] == "They have a cat called Marigold."
 
 
 def test_crisis_precedes_off_topic_and_reports_outage(api):
@@ -484,40 +571,30 @@ def test_failed_follow_up_keeps_the_existing_chat(api, fake_repo, monkeypatch):
 def test_grief_uses_the_grief_mode_not_the_clinical_form(api):
     client, provider = api
     provider.intent = "GRIEF_WORKBOOK"
-    provider.route = "GRIEF"
     result = client.post("/agentic/run", json={"prompt": "My father died by suicide last year and I miss him."})
     assert result.status_code == 200
-    assert provider.calls == [IntentDecision, ExecutionPlan, GriefAnalysis, "synthesis", AuditDecision]
+    assert provider.calls == [IntentDecision, GriefAnalysis, "synthesis", AuditDecision]
     assert ClinicalAnalysis not in provider.calls
     assert provider.payloads[-1]["mode"] == "grief"
     assert "pgd_criteria_status" not in provider.payloads[-1]["analysis"]
     assert provider.payloads[-1]["analysis"]["analysis_mode"] == "grief"
 
 
-@pytest.mark.parametrize("planned", ["CLINICAL_QUERY", "GENERAL_SUPPORT", "OFF_TOPIC"])
-def test_grief_is_never_downgraded_by_the_supervisor(api, planned):
+@pytest.mark.parametrize("category, mode", [
+    ("CRISIS", "crisis"), ("OFF_TOPIC", "off_topic"), ("GRIEF_WORKBOOK", "grief"),
+    ("CLINICAL_QUERY", "clinical_support"), ("GENERAL_SUPPORT", "general_support"),
+])
+def test_the_router_alone_picks_the_reply_mode(api, category, mode):
     client, provider = api
-    provider.intent = "GRIEF_WORKBOOK"
-    provider.route = planned
+    provider.intent = category
     assert client.post("/agentic/run", json={"prompt": "I lost my mum in May."}).status_code == 200
-    assert ClinicalAnalysis not in provider.calls
-    assert GriefAnalysis in provider.calls
-    assert provider.payloads[-1]["mode"] == "grief"
-
-
-def test_supervisor_can_still_escalate_grief_to_crisis(api):
-    client, provider = api
-    provider.intent = "GRIEF_WORKBOOK"
-    provider.route = "CRISIS"
-    assert client.post("/agentic/run", json={"prompt": "I lost my mum in May."}).status_code == 200
-    assert GriefAnalysis not in provider.calls
-    assert provider.payloads[-1]["mode"] == "crisis"
+    assert provider.calls.count(IntentDecision) == 1
+    assert provider.payloads[-1]["mode"] == mode
 
 
 def test_suicide_loss_story_is_not_an_instant_crisis(api):
     client, provider = api
     provider.intent = "GRIEF_WORKBOOK"
-    provider.route = "GRIEF"
     client.post("/agentic/run", json={"prompt": "My father died by suicide and I can't stop thinking about him."})
     assert provider.calls[0] is IntentDecision  # reached the model router instead of the crisis shortcut
     assert provider.payloads[-1]["mode"] == "grief"
@@ -598,3 +675,28 @@ def test_whitespace_only_audit_changes_keep_the_draft(api):
 
     provider.generate_structured = glitchy
     assert client.post("/agentic/run", json={"prompt": "I feel lonely."}).json()["response"] == "Support for: I feel lonely."
+
+
+def test_a_stock_sympathy_opening_is_rewritten_once(api):
+    client, provider = api
+    provider.drafts = ["I'm so sorry to hear that. Work sounds relentless.", "Four nights in a row is a lot to face."]
+    response = client.post("/agentic/run", json={"prompt": "They put me on four nights in a row."}).json()["response"]
+    assert response == "Four nights in a row is a lot to face. [audited]"
+    assert "stock phrase" in provider.payloads[-1]["revision_feedback"][0]
+
+
+def test_crisis_replies_may_open_with_a_set_line(api):
+    client, provider = api
+    provider.intent = "CRISIS"
+    provider.drafts = ["I'm really glad you told me. Are you safe right now?"]
+    response = client.post("/agentic/run", json={"prompt": "I can't go on like this."}).json()["response"]
+    assert response == "I'm really glad you told me. Are you safe right now? [audited]"
+    assert provider.calls.count("synthesis") == 1
+
+
+def test_writer_is_told_to_avoid_stock_phrases_and_follow_the_message():
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT
+
+    assert "Let the latest message decide the reply." in SYSTEM_PROMPT
+    assert "Do not use formulaic sympathy" in SYSTEM_PROMPT
+    assert "are exactly right" not in SYSTEM_PROMPT  # the old advice to open with "I'm so sorry about..."
