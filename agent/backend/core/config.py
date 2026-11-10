@@ -1,5 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -53,6 +55,10 @@ class Settings(BaseSettings):
     # Database & JWT Settings
     database_url: str = ""
     database_pooler_url: str = ""
+    # Which tables DATABASE_URL holds. "agent": this project's own tables (chat_sessions,
+    # chat_messages, user_memory, ...), as on Supabase. "held": the Held app's development
+    # database, where chats go into its "ChatSession" / "ChatMessage" tables (backend/db/held_schema.py).
+    database_schema: Literal["agent", "held"] = "agent"
     jwt_secret: str = ""
     # Testing only: requests need no token and all share one non-admin guest user.
     auth_disabled: bool = False

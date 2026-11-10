@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 from datetime import datetime, timezone
@@ -656,3 +657,34 @@ async def get_database_overview() -> Dict[str, Any]:
                 "messages_count": int(counts["messages_count"] or 0),
             },
         }
+
+
+# ==============================================================================
+# The Held app's own development database (DATABASE_SCHEMA=held) keeps chats in its
+# "ChatSession" / "ChatMessage" tables. There, each function above is served by the
+# function of the same name in held_schema.py; with the default "agent" schema
+# (Supabase), the functions above run unchanged.
+# ==============================================================================
+
+def _schema_aware(function):
+    @functools.wraps(function)
+    async def run(*args, **kwargs):
+        from backend.core.config import get_settings
+
+        if get_settings().database_schema == "held":
+            from backend.db import held_schema
+
+            return await getattr(held_schema, function.__name__)(*args, **kwargs)
+        return await function(*args, **kwargs)
+
+    return run
+
+
+def _wrap_schema_aware_functions() -> None:
+    from backend.db import held_schema
+
+    for name in held_schema.__all__:
+        globals()[name] = _schema_aware(globals()[name])
+
+
+_wrap_schema_aware_functions()

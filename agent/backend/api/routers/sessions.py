@@ -83,7 +83,10 @@ async def delete_session(session_id: str, request: Request) -> Dict[str, bool]:
     """Delete a session and cascading messages only when the caller owns it or is admin."""
     principal: AccessTokenPayload = request.state.user
     owner_id = None if principal["role"] == "ADMIN" else principal["user_id"]
-    success = await repository.delete_chat_session(session_id, user_id=owner_id)
+    try:
+        success = await repository.delete_chat_session(session_id, user_id=owner_id)
+    except PermissionError as exc:  # the Held development database does not allow it
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -1,22 +1,25 @@
 import json
 import logging
+import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import asyncpg
+import httpx
 
+from backend.core.config import get_settings
 from backend.db.connection import get_db_pool
 
 logger = logging.getLogger("held_ai.grief_notes")
 
 # ==============================================================================
-# Grief notes (migration 005): the agent's copy of each user's Held notes, with
-# the workbook exercise a note answers, and the mood catalogue.
+# Grief notes (migration 005): the agent's copy of each user's Held notes, and the
+# mood catalogue.
 # Every query is scoped to the owning user.
 # ==============================================================================
 
 NOTE_COLUMNS = """
-    n.id, n.user_id, n.note_date, n.content, n.mood_id, n.mood, n.exercise_key,
+    n.id, n.user_id, n.note_date, n.content, n.mood_id, n.mood,
     n.held_created_at, n.held_updated_at, n.synced_at
 """
 
@@ -35,14 +38,13 @@ def _timestamp(value: Any) -> Optional[datetime]:
 
 
 def _note_dict(row: Any) -> Dict[str, Any]:
-    """A stored note in Held's shape (camelCase), plus the workbook exercise key."""
+    """A stored note in Held's shape (camelCase)."""
     return {
         "id": row["id"],
         "date": row["note_date"].isoformat(),
         "content": row["content"],
         "moodId": row["mood_id"],
         "mood": _json(row["mood"]),
-        "exerciseKey": row["exercise_key"],
         "createdAt": row["held_created_at"].isoformat() if row["held_created_at"] else None,
         "updatedAt": row["held_updated_at"].isoformat() if row["held_updated_at"] else None,
         "syncedAt": row["synced_at"].isoformat() if row["synced_at"] else None,
@@ -56,9 +58,8 @@ async def _pool() -> asyncpg.Pool:
     return pool
 
 
-async def store_notes(user_id: str, notes: List[Dict[str, Any]], exercise_key: Optional[str] = None) -> None:
-    """Insert or update Held notes for the user. exercise_key, when given, is set on all of
-    them; otherwise a note keeps the exercise it already had."""
+async def store_notes(user_id: str, notes: List[Dict[str, Any]]) -> None:
+    """Insert or update Held notes for the user."""
     if not notes:
         return
     pool = await _pool()
@@ -74,35 +75,23 @@ async def store_notes(user_id: str, notes: List[Dict[str, Any]], exercise_key: O
                 await conn.execute(
                     """
                     INSERT INTO public.grief_notes (
-                        id, user_id, note_date, content, mood_id, mood, exercise_key,
+                        id, user_id, note_date, content, mood_id, mood,
                         held_created_at, held_updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
                     ON CONFLICT (id) DO UPDATE SET
                         note_date = EXCLUDED.note_date,
                         content = EXCLUDED.content,
                         mood_id = EXCLUDED.mood_id,
                         mood = EXCLUDED.mood,
-                        exercise_key = COALESCE(EXCLUDED.exercise_key, public.grief_notes.exercise_key),
                         held_created_at = EXCLUDED.held_created_at,
                         held_updated_at = EXCLUDED.held_updated_at,
                         synced_at = now();
                     """,
                     note["id"], user_id, note_date, note.get("content") or "", note.get("moodId"),
-                    json.dumps(note.get("mood")) if note.get("mood") else None, exercise_key,
+                    json.dumps(note.get("mood")) if note.get("mood") else None,
                     _timestamp(note.get("createdAt")), _timestamp(note.get("updatedAt")),
                 )
-
-
-async def set_exercise(user_id: str, note_date: date, exercise_key: Optional[str]) -> Optional[Dict[str, Any]]:
-    pool = await _pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"UPDATE public.grief_notes n SET exercise_key = $3 WHERE user_id = $1 AND note_date = $2 "
-            f"RETURNING {NOTE_COLUMNS};",
-            user_id, note_date, exercise_key,
-        )
-        return _note_dict(row) if row else None
 
 
 async def get_note(user_id: str, note_date: date) -> Optional[Dict[str, Any]]:
@@ -136,10 +125,38 @@ async def list_notes(
 
 
 async def list_moods() -> List[Dict[str, Any]]:
+    if get_settings().database_schema == "held":
+        return await _held_moods()
     pool = await _pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT id, code, title, "imageUrl" FROM public."Mood" ORDER BY title;')
         return [dict(r) for r in rows]
+
+
+_MOODS_TTL_SECONDS = 600
+_held_moods_cache: Dict[str, Any] = {"at": 0.0, "moods": None}
+
+
+async def _held_moods() -> List[Dict[str, Any]]:
+    """Held's public mood list, by title (on the Held app's own database this user cannot read
+    "Mood"). Kept for 10 minutes, since the list rarely changes."""
+    if _held_moods_cache["moods"] is not None and time.monotonic() - _held_moods_cache["at"] < _MOODS_TTL_SECONDS:
+        return _held_moods_cache["moods"]
+    base_url = get_settings().held_api_base_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(f"{base_url}/moods")
+            res.raise_for_status()
+            data = res.json().get("data")
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError("The Held mood list is unavailable.") from exc
+    if not isinstance(data, list):
+        raise RuntimeError("The Held mood list is unavailable.")
+    moods = [{"id": m["id"], "code": m["code"], "title": m["title"], "imageUrl": m.get("imageUrl")}
+             for m in data if isinstance(m, dict) and m.get("id") and m.get("code") and m.get("title")]
+    moods = sorted(moods, key=lambda m: m["title"])
+    _held_moods_cache.update(at=time.monotonic(), moods=moods)
+    return moods
 
 
 async def upsert_moods(moods: List[Dict[str, Any]]) -> Dict[str, int]:

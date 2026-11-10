@@ -1,1 +1,1 @@
-"""Grief notes: the Held app's grief journal, stored per user, with guided workbook exercises."""
+"""Grief notes: the Held app's grief journal (a note per date, with a mood)."""

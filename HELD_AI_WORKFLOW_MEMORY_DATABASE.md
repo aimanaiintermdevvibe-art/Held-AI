@@ -42,7 +42,7 @@ As of 2026-11-04.
 | `GET /agentic/users/{id}`             | Get one user (admin only)            |
 | `GET /agentic/admin/overview`         | Row counts (admin only)              |
 | `GET /agentic/diseases`               | Condition list                       |
-| `/agentic/grief-notes/...`            | Grief workbook and notes             |
+| `/agentic/grief-notes/...`            | Grief notes and moods                |
 
 Code: `agent/backend/ai_wrapper/orchestrator.py`, `agent/backend/api/routers/agentic.py`
 
@@ -109,7 +109,7 @@ The app has 9 tables, all in the `public` schema, all created by the project's m
 - **Chats:** a new chat creates a `chat_sessions` row. Each turn adds 2 `chat_messages` rows, one for the user and one for the reply, in the same write that updates the session. If a new chat's first reply fails, the empty chat is deleted. Deleting a chat removes its messages too.
 - **User memory:** one `user_memory` row per user, replaced each time they start a new chat. Deleting a user removes it.
 - **Users:** a row is added from the Held profile the first time someone logs in. No password is stored, and existing rows are never changed.
-- **Grief notes:** Held is the main copy. The backend saves a copy with the linked workbook exercise, which only it tracks, and allows one note per user per date. Held has no delete for notes.
+- **Grief notes:** a note is its text and a mood. Held is the main copy; the backend saves a copy and allows one note per user per date. Held has no delete for notes.
 - **Lists:** `Disease` and `Mood` are filled from Held by seed scripts in `agent/scripts/`.
 - **DSM book:** the 6,988 chunks are still stored but not used now that RAG is off.
 - **Security:** row level security is on for all 9 tables, so Supabase's public API keys can't read them. Only the backend, using `DATABASE_URL`, can.

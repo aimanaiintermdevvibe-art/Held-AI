@@ -13,8 +13,11 @@ TEST_SECRET = "test-secret"
 
 @pytest.fixture(autouse=True)
 def no_real_database(monkeypatch):
-    """Keep tests off the configured Supabase database; tests use FakeRepo instead."""
+    """Keep tests off the configured databases (Supabase or the Held development database);
+    tests use FakeRepo instead, and the default "agent" table layout whatever .env says."""
+    monkeypatch.setattr(get_settings(), "database_schema", "agent")
     monkeypatch.setattr("backend.db.repository.get_db_pool", AsyncMock(return_value=None))
+    monkeypatch.setattr("backend.db.held_schema.get_db_pool", AsyncMock(return_value=None))
     monkeypatch.setattr("backend.db.documents.get_db_pool", AsyncMock(return_value=None))
     # Chat tests run without uploaded documents or grief notes unless a test provides some.
     # monkeypatch.setattr("backend.api.routers.agentic.excerpts_for_chat", AsyncMock(return_value=[]))  # RAG disabled

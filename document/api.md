@@ -33,13 +33,12 @@ The Held AI Agent API provides multi-agent AI support and persists conversations
 | **Documents** | `DELETE` | `/agentic/documents/{id}` | Delete a document and its chunks |
 | **Documents** | `POST` | `/agentic/documents/search` | `{"query", "top_k", "document_ids"?}`: nearest passages by cosine similarity |
 | **Diseases** | `GET` | `/agentic/diseases` | The disease catalogue (`public."Disease"`, seeded from Held `GET /diseases` by `agent/scripts/seed_diseases.py`) |
-| **Grief notes** | `GET` | `/agentic/grief-notes/exercises` | Guided workbook exercises |
 | **Grief notes** | `GET` | `/agentic/grief-notes/moods` | Mood catalogue (seeded from Held) |
 | **Grief notes** | `POST` | `/agentic/grief-notes/sync` | Store all of the user's Held notes |
 | **Grief notes** | `GET` | `/agentic/grief-notes` | List notes (`page`, `limit`, `from`, `to`) |
 | **Grief notes** | `POST` | `/agentic/grief-notes` | Write a note for a date (via Held) |
 | **Grief notes** | `GET` | `/agentic/grief-notes/{date}` | One note |
-| **Grief notes** | `PATCH` | `/agentic/grief-notes/{date}` | Edit content/mood (Held) or exercise (agent)
+| **Grief notes** | `PATCH` | `/agentic/grief-notes/{date}` | Edit the note's content and/or mood (via Held) |
 | **Admin** | `GET` | `/agentic/admin/overview` | Database summary entity counts |
 
 > **Configuration Note**: `DATABASE_URL` and `JWT_SECRET` are read from the local `.env` or the deployment environment. The agent writes to `chat_sessions`, `chat_messages`, `documents` and `document_chunks` (pgvector, migration 002), and adds `User` rows for Held users it has not seen before; it does not create tables (see `agent/migrations/001_user_and_chat_tables.sql`). If the Supabase direct host is unreachable (it is IPv6-only), set `DATABASE_POOLER_URL` to the IPv4 session pooler URL. Each reply sends the chat's latest 20 messages, plus its rolling summary once the chat is longer, and a short user memory (`public.user_memory`, migration 006) of the user's other chats. Summarisation fires once **10 messages** (user + assistant combined) have built up after the last summary, and runs in a background queue — the user is never delayed. The configured LAN database must be reachable from the machine running the agent.

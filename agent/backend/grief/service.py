@@ -1,8 +1,8 @@
 """Grief notes through Held's API (the source of truth), stored in public.grief_notes.
 
 Every call uses the caller's own Held access token. Notes the agent creates, edits or
-reads are stored locally with the workbook exercise they answer; listing syncs the
-requested page from Held first and falls back to the stored copy if Held is unreachable.
+reads are stored locally; listing syncs the requested page from Held first and falls back
+to the stored copy if Held is unreachable.
 Held has no delete for notes, so neither does the agent.
 """
 import logging
@@ -16,7 +16,7 @@ from backend.core.auth import HELD_TIMEOUT_SECONDS
 from backend.core.config import get_settings
 from backend.core.held_client import HeldApiError
 from backend.db import grief_notes as store
-from backend.grief.exercises import exercise_summary
+from backend.db import held_schema
 
 logger = logging.getLogger("held_ai.grief_notes")
 HELD_PAGE_LIMIT = 200  # Held's maximum page size for GET /notes
@@ -51,15 +51,39 @@ async def held(method: str, path: str, token: str, **kwargs: Any) -> Any:
     return payload.get("data")
 
 
-def present(note: dict[str, Any]) -> dict[str, Any]:
-    """A stored note as returned to clients: Held's fields plus the workbook exercise."""
-    return {**{k: v for k, v in note.items() if k != "exerciseKey"}, "exercise": exercise_summary(note.get("exerciseKey"))}
+def _keeps_copy() -> bool:
+    """Whether notes are copied into the agent's own table. On the Held app's own database
+    (DATABASE_SCHEMA=held) notes are read straight from its "GriefNote" table and written
+    through Held's API."""
+    return get_settings().database_schema != "held"
+
+
+def _from_held(note: dict[str, Any]) -> dict[str, Any]:
+    """A note as Held returned it, with a plain YYYY-MM-DD date like a stored note."""
+    return {**note, "date": str(note.get("date") or "")[:10]}
+
+
+async def _with_moods(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """"GriefNote" rows with their mood objects (from Held's mood list)."""
+    try:
+        moods = {m["id"]: m for m in await store.list_moods()}
+    except RuntimeError as exc:
+        logger.warning("Could not load the mood list: %s", exc)
+        moods = {}
+    return [{**n, "mood": moods.get(n["moodId"])} for n in notes]
 
 
 async def list_notes(
     user_id: str, token: str, *, page: int, limit: int, date_from: date | None, date_to: date | None,
 ) -> dict[str, Any]:
-    """A page of the user's notes, newest first: synced from Held, served from the stored copy."""
+    """A page of the user's notes, newest first: synced from Held, served from the stored copy
+    (on the Held app's own database: read from its "GriefNote" table)."""
+    if not _keeps_copy():
+        notes, total = await held_schema.list_grief_notes(user_id, date_from, date_to, page, limit)
+        pages = (total + limit - 1) // limit
+        return {"notes": [n for n in await _with_moods(notes)], "source": "database",
+                "pagination": {"page": page, "limit": limit, "total": total, "pages": pages,
+                               "hasNext": page < pages, "hasPrev": page > 1}}
     params: dict[str, Any] = {"page": page, "limit": limit}
     if date_from:
         params["from"] = date_from.isoformat()
@@ -73,7 +97,7 @@ async def list_notes(
         logger.warning("Held unreachable; serving stored grief notes for %s.", user_id)
         notes, total = await store.list_notes(user_id, date_from, date_to, page, limit)
         pages = (total + limit - 1) // limit
-        return {"notes": [present(n) for n in notes], "source": "stored copy (Held unreachable)",
+        return {"notes": [n for n in notes], "source": "stored copy (Held unreachable)",
                 "pagination": {"page": page, "limit": limit, "total": total, "pages": pages,
                                "hasNext": page < pages, "hasPrev": page > 1}}
 
@@ -81,14 +105,18 @@ async def list_notes(
     await store.store_notes(user_id, held_notes)
     stored = {n["id"]: n for n in (await store.list_notes(user_id, date_from, date_to, 1, 10_000))[0]}
     return {
-        "notes": [present(stored.get(n["id"], {**n, "exerciseKey": None})) for n in held_notes],
+        "notes": [stored.get(n["id"], _from_held(n)) for n in held_notes],
         "source": "held",
         "pagination": data.get("pagination"),
     }
 
 
 async def sync_all(user_id: str, token: str) -> dict[str, int]:
-    """Store every one of the user's Held notes (all pages)."""
+    """Store every one of the user's Held notes (all pages). On the Held app's own database the
+    notes are already there, so nothing is copied."""
+    if not _keeps_copy():
+        _, total = await held_schema.list_grief_notes(user_id, limit=1)
+        return {"synced": 0, "stored": total}
     page, synced = 1, 0
     while True:
         data = await held("GET", "/notes", token, params={"page": page, "limit": HELD_PAGE_LIMIT})
@@ -104,32 +132,38 @@ async def sync_all(user_id: str, token: str) -> dict[str, int]:
 
 
 async def get_note(user_id: str, token: str, note_date: date) -> dict[str, Any]:
+    if not _keeps_copy():
+        note = await held_schema.get_grief_note(user_id, note_date)
+        if not note:
+            raise HeldApiError(404, "No grief note for this date.", "NOTE_NOT_FOUND")
+        return (await _with_moods([note]))[0]
     note = await held("GET", f"/notes/{note_date.isoformat()}", token)
     await store.store_notes(user_id, [note])
-    return present(await store.get_note(user_id, note_date))
+    return await store.get_note(user_id, note_date)
 
 
 async def create_note(
-    user_id: str, token: str, *, note_date: date, content: str, mood_id: str, exercise_key: str | None,
+    user_id: str, token: str, *, note_date: date, content: str, mood_id: str,
 ) -> dict[str, Any]:
     note = await held("POST", "/notes", token, json={"date": note_date.isoformat(), "content": content, "moodId": mood_id})
-    await store.store_notes(user_id, [note], exercise_key)
     logger.info("Created grief note %s for %s.", note_date, user_id)
-    return present(await store.get_note(user_id, note_date))
+    if not _keeps_copy():
+        return _from_held(note)
+    await store.store_notes(user_id, [note])
+    return await store.get_note(user_id, note_date)
 
 
 async def update_note(
     user_id: str, token: str, *, note_date: date, content: str | None, mood_id: str | None,
-    exercise_key: str | None, change_exercise: bool,
 ) -> dict[str, Any]:
-    """Edit content and/or mood on Held, and/or the workbook exercise (stored only by the agent)."""
+    """Edit the note's text and/or mood on Held."""
     body = {k: v for k, v in (("content", content), ("moodId", mood_id)) if v is not None}
     note = await held("PATCH", f"/notes/{note_date.isoformat()}", token, json=body) if body \
         else await held("GET", f"/notes/{note_date.isoformat()}", token)
+    if not _keeps_copy():
+        return _from_held(note)
     await store.store_notes(user_id, [note])
-    if change_exercise:
-        await store.set_exercise(user_id, note_date, exercise_key)
-    return present(await store.get_note(user_id, note_date))
+    return await store.get_note(user_id, note_date)
 
 
 async def notes_for_chat(user_id: str, token: str, prompt: str) -> list[dict[str, Any]]:
@@ -137,6 +171,15 @@ async def notes_for_chat(user_id: str, token: str, prompt: str) -> list[dict[str
     synced from Held when possible, otherwise the stored copy, and [] if both fail."""
     if not _REFERS_TO_NOTES.search(prompt):
         return []
+    if not _keeps_copy():
+        try:
+            notes, _ = await held_schema.list_grief_notes(user_id, limit=CHAT_NOTES)
+        except Exception as exc:  # the database is unreachable or refused
+            logger.warning("Could not load grief notes for chat: %s", exc)
+            return []
+        notes = await _with_moods(notes)
+        return [{"date": n["date"], "mood": (n.get("mood") or {}).get("title"), "text": (n.get("content") or "")[:CHAT_NOTE_CHARS]}
+                for n in notes]
     try:
         await store.store_notes(user_id, (await held("GET", "/notes", token, params={"limit": CHAT_NOTES})).get("notes") or [])
     except (HeldApiError, ValueError) as exc:
@@ -150,7 +193,6 @@ async def notes_for_chat(user_id: str, token: str, prompt: str) -> list[dict[str
         {
             "date": n["date"],
             "mood": (n.get("mood") or {}).get("title"),
-            **({"exercise": exercise_summary(n["exerciseKey"])["title"]} if exercise_summary(n.get("exerciseKey")) else {}),
             "text": n["content"][:CHAT_NOTE_CHARS],
         }
         for n in notes

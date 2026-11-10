@@ -178,33 +178,21 @@ Code: `agent/backend/ai_wrapper/client.py`, `agent/backend/ai_wrapper/usage.py`,
 
 Code: `agent/backend/ai_wrapper/memory.py`
 
-## Grief workbook
+## Grief notes
 
-The grief workbook is a daily journal with 9 guided exercises and 20 moods. Held's API owns the notes, and the chatbot keeps a copy so chat can use them. Grief conversations in chat are separate, and are covered under Grief and crisis handling.
-
-| Exercise | What it asks the user to do |
-| --- | --- |
-| A letter to my loved one | Write to them directly |
-| A memory I want to keep | Describe one moment in detail |
-| What I wish I had said | Name what went unsaid |
-| How I'm feeling today | Name mixed feelings and where they sit in the body |
-| What helps me cope | List what brings even a little comfort |
-| Hard dates ahead | Plan for anniversaries, birthdays and holidays |
-| Who supports me | Think about who they can lean on |
-| Things I'm carrying | Write down guilt, anger or regret without judging it |
-| Carrying them with me | Choose a value, habit or lesson to carry forward |
+Grief notes are the Held app's daily grief journal. A note is its text and a mood, chosen from 20 moods, with one note per user per date. Held's API owns the notes, and the chatbot keeps a copy so chat can use them. Grief conversations in chat are separate, and are covered under Grief and crisis handling.
 
 ### How a note is saved
 
-1. The app loads the exercises and moods.
-2. The user writes a note for a date, picks a mood, and can link an exercise.
+1. The app loads the moods.
+2. The user writes a note for a date and picks a mood.
 3. The backend sends the date, text and mood to Held. Held allows one note per user per date.
-4. The backend saves a copy in Supabase (`public.grief_notes`) with the exercise. Only this copy knows the exercise, because Held has no field for it.
+4. The backend saves a copy in Supabase (`public.grief_notes`).
 
 ### How notes are used after that
 
 - **Listing:** notes come from Held. If Held cannot be reached, the stored copy is shown instead.
-- **Editing:** text and mood change on Held. The linked exercise changes only in Supabase.
+- **Editing:** text and mood change on Held, and the copy is updated.
 - **Deleting:** not available, because Held has no delete for notes.
 - **In chat:** when a message mentions notes, a journal, diary, workbook or "what did I write", the 10 newest notes are given to Agent 3 and Agent 4. Each note is cut to 1,000 characters. Other messages get no notes.
 - **Tone:** Agent 3 can describe what the user wrote and how their mood has moved. It must not judge, correct or diagnose anything they wrote.
@@ -398,7 +386,7 @@ The core chat works, but this version is local only until it is pushed. Render s
 | Context memory | Works, tested live | All testers share one memory, so details can cross between them. The cheaper memory is tested locally only |
 | Login and refresh | Not active | These belong to the Held API, not this backend, and guest mode skips them |
 | User-based modes | Not active | The guest has no Held profile, so no mode is set |
-| Grief workbook | Partly works | The exercise and mood lists work. Creating and syncing notes need a real Held token |
+| Grief notes | Partly works | The mood list works. Creating and syncing notes need a real Held token |
 | DSM-focused replies | Not deployed yet | Tested locally, and available to all users once pushed |
 | Document upload | Switched off locally | Still on in the deployed version until this change is pushed |
 

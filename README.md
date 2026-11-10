@@ -75,19 +75,17 @@ The collection holds the test login and is git-ignored.
 
 The Held app's grief journal: one note per user per date, with a mood. Held's API stays the source
 of truth; the agent writes and reads through it with the caller's own token and stores every note it
-sees in `public.grief_notes` (migration [005_grief_notes.sql](agent/migrations/005_grief_notes.sql)),
-with the guided workbook exercise the note answers (kept by the agent only). Moods are seeded into
-`public."Mood"` by `python agent/scripts/seed_moods.py`.
+sees in `public.grief_notes` (migration [005_grief_notes.sql](agent/migrations/005_grief_notes.sql)).
+A note is its text and a mood. Moods are seeded into `public."Mood"` by `python agent/scripts/seed_moods.py`.
 
-| Method  | Endpoint                                  | Purpose                                                                    |
-| ------- | ----------------------------------------- | -------------------------------------------------------------------------- |
-| `GET`   | `/agentic/grief-notes/exercises`          | Guided workbook exercises (key, title, prompt)                             |
-| `GET`   | `/agentic/grief-notes/moods`              | Moods a note can carry                                                     |
-| `POST`  | `/agentic/grief-notes/sync`               | Store all of the user's existing Held notes                                |
-| `GET`   | `/agentic/grief-notes?page&limit&from&to` | Notes, newest first (synced from Held; stored copy if Held is down)        |
-| `POST`  | `/agentic/grief-notes`                    | `{"date", "content", "mood" or "moodId", "exercise"?}`; one per date (409) |
-| `GET`   | `/agentic/grief-notes/{date}`             | One note                                                                   |
-| `PATCH` | `/agentic/grief-notes/{date}`             | `content` / `mood` (saved to Held) and/or `exercise` (null clears it)      |
+| Method  | Endpoint                                  | Purpose                                                             |
+| ------- | ----------------------------------------- | ------------------------------------------------------------------- |
+| `GET`   | `/agentic/grief-notes/moods`              | Moods a note can carry                                              |
+| `POST`  | `/agentic/grief-notes/sync`               | Store all of the user's existing Held notes                         |
+| `GET`   | `/agentic/grief-notes?page&limit&from&to` | Notes, newest first (synced from Held; stored copy if Held is down) |
+| `POST`  | `/agentic/grief-notes`                    | `{"date", "content", "mood" or "moodId"}`; one per date (409)       |
+| `GET`   | `/agentic/grief-notes/{date}`             | One note                                                            |
+| `PATCH` | `/agentic/grief-notes/{date}`             | `content` and/or `mood`, saved to Held                              |
 
 There is no delete: Held's API has none. In chat, a message that mentions the user's notes, journal,
 diary or workbook gets their 10 most recent notes as context (`grief_notes`) for the writer and the
@@ -169,6 +167,7 @@ Configuration is loaded from `agent/.env` or environment variables:
 | `AGENTIC_STREAM_CHUNK_SIZE`                                           | Target character size per stream chunk; default: 24                                                   |
 | `AGENTIC_STREAM_DELAY_SECONDS`                                        | Release delay between SSE chunks; default: 0.03 seconds                                               |
 | `DATABASE_URL`                                                        | Held PostgreSQL connection string                                                                     |
+| `DATABASE_SCHEMA`                                                     | `agent` (default, Supabase tables) or `held` (Held app's development DB)                              |
 | `JWT_SECRET`                                                          | Server-side HS256 key for agent API tokens; required by the local development terminal client         |
 | `AUTH_DISABLED`                                                       | Testing only. `true` accepts requests without a token, all as one shared guest user; default: `false` |
 | `HELD_API_BASE_URL`                                                   | Held API base URL (profiles for the server; sign-in, sign-up and onboarding for the terminal client)  |

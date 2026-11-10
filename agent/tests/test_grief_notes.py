@@ -13,7 +13,6 @@ from backend.core.config import Settings
 from backend.core.held_client import HeldApiError
 from backend.db import grief_notes as store
 from backend.grief import service
-from backend.grief.exercises import EXERCISES
 from backend.main import app
 from tests.test_agentic import FakeProvider
 
@@ -75,21 +74,15 @@ class FakeNotesStore:
         self.rows: dict[tuple[str, str], dict] = {}
         self.moods = [GRATEFUL, SAD]
 
-    async def store_notes(self, user_id, notes, exercise_key=None):
+    async def store_notes(self, user_id, notes):
         for note in notes:
             key = (user_id, note["date"][:10])
             previous = self.rows.get(key, {})
             self.rows[key] = {
                 "id": note["id"], "date": note["date"][:10], "content": note["content"], "moodId": note.get("moodId"),
-                "mood": note.get("mood"), "exerciseKey": exercise_key or previous.get("exerciseKey"),
+                "mood": note.get("mood"),
                 "createdAt": note.get("createdAt"), "updatedAt": note.get("updatedAt"), "syncedAt": "now",
             }
-
-    async def set_exercise(self, user_id, note_date, exercise_key):
-        row = self.rows.get((user_id, note_date.isoformat()))
-        if row:
-            row["exerciseKey"] = exercise_key
-        return dict(row) if row else None
 
     async def get_note(self, user_id, note_date):
         row = self.rows.get((user_id, note_date.isoformat()))
@@ -109,7 +102,7 @@ class FakeNotesStore:
 @pytest.fixture
 def notes_store(monkeypatch):
     fake = FakeNotesStore()
-    for name in ("store_notes", "set_exercise", "get_note", "list_notes", "list_moods"):
+    for name in ("store_notes", "get_note", "list_notes", "list_moods"):
         monkeypatch.setattr(store, name, getattr(fake, name))
     return fake
 
@@ -131,12 +124,6 @@ def token_of(client):
     return client.headers["Authorization"].removeprefix("Bearer ")
 
 
-def test_exercises_are_listed(client):
-    exercises = client.get("/agentic/grief-notes/exercises").json()
-    assert exercises == EXERCISES
-    assert {"key", "title", "prompt"} <= set(exercises[0])
-
-
 def test_moods_come_from_the_seeded_catalogue(client):
     assert [m["code"] for m in client.get("/agentic/grief-notes/moods").json()] == ["grateful", "sad"]
 
@@ -153,7 +140,7 @@ def test_list_syncs_from_held_and_stores_the_page(client, held, notes_store):
     res = client.get("/agentic/grief-notes?limit=1").json()
     assert res["source"] == "held"
     assert [n["date"] for n in res["notes"]] == ["2026-10-06"]
-    assert res["notes"][0]["mood"]["title"] == "Sad" and res["notes"][0]["exercise"] is None
+    assert res["notes"][0]["mood"]["title"] == "Sad" and "exercise" not in res["notes"][0]
     assert res["pagination"]["total"] == 2
     assert ("usr_1", "2026-10-06") in notes_store.rows
 
@@ -167,21 +154,18 @@ def test_list_falls_back_to_the_stored_copy_when_held_is_down(client, held):
     assert res["pagination"]["total"] == 1
 
 
-def test_create_resolves_the_mood_code_and_stores_the_exercise(client, held, notes_store):
-    res = client.post("/agentic/grief-notes", json={
-        "date": "2026-10-28", "content": "Dear Mum, I miss our walks.", "mood": "sad", "exercise": "letter_to_loved_one",
-    })
+def test_a_note_is_its_text_and_a_mood_given_by_code(client, held, notes_store):
+    res = client.post("/agentic/grief-notes", json={"date": "2026-10-28", "content": "Dear Mum, I miss our walks.", "mood": "sad"})
     assert res.status_code == 201
     note = res.json()
-    assert (note["date"], note["moodId"], note["exercise"]) == (
-        "2026-10-28", "mood-sad", {"key": "letter_to_loved_one", "title": "A letter to my loved one"},
-    )
+    assert (note["date"], note["moodId"], note["content"]) == ("2026-10-28", "mood-sad", "Dear Mum, I miss our walks.")
+    assert "exercise" not in note
     assert held.calls[-1][3]["json"] == {"date": "2026-10-28", "content": "Dear Mum, I miss our walks.", "moodId": "mood-sad"}
-    assert notes_store.rows[("usr_1", "2026-10-28")]["exerciseKey"] == "letter_to_loved_one"
+    assert ("usr_1", "2026-10-28") in notes_store.rows
 
 
 @pytest.mark.parametrize("body, fragment", [
-    ({"date": "2026-10-28", "content": "x", "mood": "sad", "exercise": "made_up"}, "Unknown exercise"),
+    ({"date": "2026-10-28", "content": "x", "mood": "sad", "exercise": "letter"}, "extra"),
     ({"date": "2026-10-28", "content": "x", "mood": "ecstatic"}, "Unknown mood"),
     ({"date": "2026-10-28", "content": "x"}, "A mood is required"),
     ({"date": "2026-10-28", "content": "x" * 5001, "mood": "sad"}, "5000"),
@@ -209,12 +193,11 @@ def test_editing_content_and_mood_goes_to_held(client, held, notes_store):
     assert held.calls[-1][3]["json"] == {"content": "Thinking of Dad, smiling.", "moodId": "mood-grateful"}
 
 
-def test_the_exercise_is_set_and_cleared_without_changing_the_held_note(client, held, notes_store):
-    note = client.patch("/agentic/grief-notes/2026-09-16", json={"exercise": "memory_to_keep"}).json()
-    assert note["exercise"]["key"] == "memory_to_keep" and note["content"] == "Thinking of Dad today."
-    assert not any(call[0] == "PATCH" for call in held.calls)
-    assert client.patch("/agentic/grief-notes/2026-09-16", json={"exercise": None}).json()["exercise"] is None
+def test_an_edit_needs_text_or_a_mood(client, held):
     assert client.patch("/agentic/grief-notes/2026-09-16", json={}).status_code == 422
+    assert client.patch("/agentic/grief-notes/2026-09-16", json={"exercise": "letter"}).status_code == 422
+    assert client.get("/agentic/grief-notes/exercises").status_code in (404, 422)  # no such list any more
+    assert not any(call[0] == "PATCH" for call in held.calls)
 
 
 def test_notes_cannot_be_deleted_and_need_sign_in(client, fake_repo, notes_store, held):
@@ -238,10 +221,8 @@ def test_chat_gets_recent_notes_only_when_the_message_refers_to_them(notes_store
 def test_chat_uses_the_stored_copy_when_held_is_down(notes_store, held):
     asyncio.run(service.notes_for_chat("usr_1", "tok", "my notes"))
     held.down = True
-    asyncio.run(notes_store.set_exercise("usr_1", date(2026, 9, 16), "memory_to_keep"))
     notes = asyncio.run(service.notes_for_chat("usr_1", "tok", "show my grief notes"))
-    assert notes[1] == {"date": "2026-09-16", "mood": "Sad", "exercise": "A memory I want to keep",
-                        "text": "Thinking of Dad today."}
+    assert notes[1] == {"date": "2026-09-16", "mood": "Sad", "text": "Thinking of Dad today."}
 
 
 def test_notes_reach_the_writer_and_the_auditor(fake_repo, auth, notes_store, held, monkeypatch):

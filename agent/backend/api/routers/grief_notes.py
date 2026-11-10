@@ -8,14 +8,13 @@ from backend.core.auth import AccessTokenPayload, require_auth
 from backend.core.held_client import HeldApiError
 from backend.db import grief_notes as store
 from backend.grief import service
-from backend.grief.exercises import EXERCISES
 from backend.schemas.grief_notes import GriefNoteCreate, GriefNoteUpdate
 
 logger = logging.getLogger("held_ai.api.grief_notes")
 
 # The Held app's grief notes (one per user per date, with a mood), written and read through
-# Held's API with the caller's own token and stored per user in public.grief_notes, plus the
-# guided workbook exercises a note can answer. Held has no delete for notes.
+# Held's API with the caller's own token and stored per user in public.grief_notes.
+# Held has no delete for notes.
 router = APIRouter(prefix="/agentic/grief-notes", tags=["Grief notes"], dependencies=[Depends(require_auth)])
 
 
@@ -39,11 +38,6 @@ async def _mood_id(mood_id: Optional[str], mood_code: Optional[str]) -> Optional
             detail=f"Unknown mood {mood_code!r}; use one of: {', '.join(sorted(moods)) or 'none seeded yet'}.",
         )
     return moods[mood_code]
-
-
-@router.get("/exercises", summary="Guided grief-workbook exercises")
-async def list_exercises() -> List[Dict[str, str]]:
-    return EXERCISES
 
 
 @router.get("/moods", summary="Moods a note can carry")
@@ -87,14 +81,13 @@ async def list_notes(
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Write a grief note for a date")
 async def create_note(payload: GriefNoteCreate, request: Request) -> Dict[str, Any]:
-    """One note per date (Held returns 409 for a second one). Mood by moodId or code; the
-    optional exercise key records which workbook exercise the note answers."""
+    """One note per date (Held returns 409 for a second one): its text and a mood, by moodId or code."""
     principal: AccessTokenPayload = request.state.user
     try:
         mood_id = await _mood_id(payload.moodId, payload.mood)
         return await service.create_note(
             principal["user_id"], request.state.access_token, note_date=payload.date,
-            content=payload.content, mood_id=mood_id, exercise_key=payload.exercise,
+            content=payload.content, mood_id=mood_id,
         )
     except HeldApiError as exc:
         raise _held_error(exc) from exc
@@ -115,14 +108,13 @@ async def get_note(note_date: date, request: Request) -> Dict[str, Any]:
 
 @router.patch("/{note_date}", summary="Edit your grief note for a date")
 async def update_note(note_date: date, payload: GriefNoteUpdate, request: Request) -> Dict[str, Any]:
-    """content and mood are saved to Held; exercise (or null to clear it) is stored by the agent."""
+    """Change the note's text and/or mood on Held."""
     principal: AccessTokenPayload = request.state.user
     try:
         mood_id = await _mood_id(payload.moodId, payload.mood)
         return await service.update_note(
             principal["user_id"], request.state.access_token, note_date=note_date,
-            content=payload.content, mood_id=mood_id, exercise_key=payload.exercise,
-            change_exercise="exercise" in payload.model_fields_set,
+            content=payload.content, mood_id=mood_id,
         )
     except HeldApiError as exc:
         raise _held_error(exc) from exc
