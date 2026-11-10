@@ -274,9 +274,13 @@ async def get_messages_after(session_id: str, anchor_id: Optional[str], limit: i
     return [{"id": r["id"], "role": r["role"], "content": r["content"], "created_at": _iso(r["createdAt"])} for r in rows]
 
 
-async def save_turn(session_id: str, prompt: str, response: str, title: Optional[str] = None) -> Optional[Dict[str, Any]]:
+async def save_turn(
+    session_id: str, prompt: str, response: str, title: Optional[str] = None,
+    reply_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Both messages, the chat's updatedAt and (for a new chat) its title, in one statement. The
-    columns keep milliseconds, so the reply is stamped one millisecond after the prompt."""
+    columns keep milliseconds, so the reply is stamped one millisecond after the prompt.
+    reply_metadata (e.g. the reply's token use) goes into the reply's metadata."""
     pool = await get_db_pool()
     key = _key(session_id)
     if not pool or not key:
@@ -286,10 +290,10 @@ async def save_turn(session_id: str, prompt: str, response: str, title: Optional
             f"""
             WITH t AS (SELECT {NOW} AS at),
             m AS (
-                INSERT INTO "ChatMessage" (id, "sessionId", role, content, "createdAt")
-                SELECT $2, $1, 'user', $4, t.at FROM t
+                INSERT INTO "ChatMessage" (id, "sessionId", role, content, metadata, "createdAt")
+                SELECT $2, $1, 'user', $4, '{{}}'::jsonb, t.at FROM t
                 UNION ALL
-                SELECT $3, $1, 'assistant', $5, t.at + interval '1 millisecond' FROM t
+                SELECT $3, $1, 'assistant', $5, COALESCE($7::jsonb, '{{}}'::jsonb), t.at + interval '1 millisecond' FROM t
                 RETURNING id, role, content, "createdAt"
             ), s AS (
                 UPDATE "ChatSession"
@@ -304,6 +308,7 @@ async def save_turn(session_id: str, prompt: str, response: str, title: Optional
             FROM s
             """,
             key, str(uuid4()), str(uuid4()), prompt, response, title,
+            json.dumps(reply_metadata) if reply_metadata else None,
         )
     if not row:
         return None

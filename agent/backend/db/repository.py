@@ -293,10 +293,12 @@ async def get_messages_after(
 
 async def save_turn(
     session_id: str, prompt: str, response: str, title: Optional[str] = None,
+    reply_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Store a turn in one statement: the user's message and the reply, the session's message
     count, and (for a new chat) its title. Returns the two stored messages with the session's
-    new total_message_count, title and updated_at."""
+    new total_message_count, title and updated_at. reply_metadata (e.g. the reply's token use)
+    goes into the reply's metadata."""
     pool = await get_db_pool()
     session_key = _uuid(session_id)
     if not pool or not session_key:
@@ -308,8 +310,9 @@ async def save_turn(
             WITH m AS (
                 -- One statement shares one NOW(); the reply is stamped just after the prompt
                 -- so the two always sort in order.
-                INSERT INTO public.chat_messages (session_id, role, content, created_at)
-                VALUES ($1, 'user', $2, NOW()), ($1, 'assistant', $3, NOW() + interval '1 microsecond')
+                INSERT INTO public.chat_messages (session_id, role, content, metadata, created_at)
+                VALUES ($1, 'user', $2, '{}'::jsonb, NOW()),
+                       ($1, 'assistant', $3, COALESCE($5::jsonb, '{}'::jsonb), NOW() + interval '1 microsecond')
                 RETURNING id, role, content, created_at
             ), s AS (
                 UPDATE public.chat_sessions
@@ -328,6 +331,7 @@ async def save_turn(
             prompt,
             response,
             title,
+            json.dumps(reply_metadata) if reply_metadata else None,
         )
         if not row:
             return None

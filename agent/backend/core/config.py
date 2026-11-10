@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # Upper limit on one Gemini answer, thinking included. Replies use far less; it only stops
     # a runaway answer from running up the bill.
     gemini_max_output_tokens: int = Field(default=8192, ge=1024, le=65536)
+    # Testing aid: show each reply's token use in /run, /stream and the messages API. It is
+    # stored with the reply either way.
+    show_token_usage: bool = True
 
     # Uploaded documents and retrieval (RAG). Vectors are 768-dimensional (migration 002).
     embedding_model: str = "gemini-embedding-001"

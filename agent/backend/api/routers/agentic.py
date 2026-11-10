@@ -214,9 +214,10 @@ async def run_agentic(payload: AgenticRunRequest, request: Request) -> AgenticRu
         status_code, detail, headers = _failure(exc)
         raise HTTPException(status_code=status_code, detail=detail, headers=headers) from exc
 
-    await _finish_turn(chat, payload.prompt, response, tracker)
+    usage = await _finish_turn(chat, payload.prompt, response, tracker)
     return AgenticRunResponse(
         response=response, session_id=session["id"], session=session,
+        usage=usage if settings.show_token_usage else None,
         # sources=as_sources(retrieved) or None,  # RAG disabled
     )
 
@@ -267,8 +268,10 @@ async def stream_agentic(payload: AgenticRunRequest, request: Request) -> Stream
                 await asyncio.sleep(settings.agentic_stream_delay_seconds)
 
         # 2. Persist the turn and queue the background memory updates (non-blocking).
-        await _finish_turn(chat, payload.prompt, response, tracker)
+        usage = await _finish_turn(chat, payload.prompt, response, tracker)
         done: dict[str, object] = {"done": True, "sessionId": session["id"], "session_id": session["id"], "session": session}
+        if settings.show_token_usage:
+            done["usage"] = usage
         # RAG disabled:
         # if retrieved:
         #     done["sources"] = as_sources(retrieved)
@@ -331,27 +334,31 @@ def _client_metadata(metadata: dict | None) -> dict | None:
     return {k: v for k, v in metadata.items() if k != "memory"} if metadata else metadata
 
 
-async def _finish_turn(chat: _Chat, prompt: str, response: str, tracker: UsageTracker) -> None:
-    """Save the turn in one write (with a new chat's AI-written title), log its token use, then
+async def _finish_turn(chat: _Chat, prompt: str, response: str, tracker: UsageTracker) -> dict:
+    """Save the turn in one write (with a new chat's AI-written title, and the reply's token use
+    in its metadata), log the token use, then
     queue the memory updates that are due: the rolling summary every SUMMARY_THRESHOLD
     messages, and the user memory when a chat starts.
 
     Saving is awaited, so the turn is stored before the response completes; the memory
-    updates run in the background so the user never waits.
+    updates run in the background so the user never waits. Returns the turn's token use.
     """
     session = chat.session
     title = None
     if chat.is_new:
         with track_usage(tracker):
             title = await generate_title(gemini_client, settings, prompt, response)
+    usage = tracker.summary()
     log_usage("turn", tracker, session=session["id"])
     try:
-        saved = await repository.save_turn(session["id"], prompt, response, title=title)
+        saved = await repository.save_turn(
+            session["id"], prompt, response, title=title, reply_metadata={"usage": usage},
+        )
     except Exception as exc:
         logger.error("Could not persist turn for session %s: %s", session["id"], exc)
-        return
+        return usage
     if not saved:
-        return
+        return usage
     session.update(
         total_message_count=saved["total_message_count"], title=saved["title"], updated_at=saved["updated_at"],
     )
@@ -360,6 +367,7 @@ async def _finish_turn(chat: _Chat, prompt: str, response: str, tracker: UsageTr
         _enqueue(_summary_job(session["id"], known))
     if chat.is_new and chat.previous:
         _enqueue(_user_memory_job(session["user_id"], chat.previous))
+    return usage
 
 
 def _chunk_text(text: str, target_size: int = 24) -> list[str]:

@@ -133,15 +133,15 @@ class FakeRepo:
         start = ids.index(anchor_id) + 1 if anchor_id in ids else 0
         return [self._brief(m) for m in stored[start:start + limit]]
 
-    async def save_turn(self, session_id, prompt, response, title=None):
+    async def save_turn(self, session_id, prompt, response, title=None, reply_metadata=None):
         self.ops.append("save_turn")
         session = self.sessions.get(session_id)
         if not session:
             return None
         saved = [
             {"id": str(uuid4()), "session_id": session_id, "role": role, "content": content,
-             "metadata": {}, "created_at": self._now()}
-            for role, content in (("user", prompt), ("assistant", response))
+             "metadata": metadata, "created_at": self._now()}
+            for role, content, metadata in (("user", prompt, {}), ("assistant", response, dict(reply_metadata or {})))
         ]
         self.messages[session_id].extend(saved)
         session["total_message_count"] += 2

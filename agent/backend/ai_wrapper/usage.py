@@ -11,6 +11,11 @@ PRICING = {
     "gemini-3.5-flash-lite": {"input": 0.30, "cached_input": 0.03, "output": 2.50},
 }
 PRICING_SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
+# What a reply carries about its own token use (stored with it; shown while SHOW_TOKEN_USAGE is on).
+SUMMARY_KEYS = (
+    "input_tokens", "output_tokens", "thinking_tokens", "cached_input_tokens", "total_tokens",
+    "estimated_cost_usd", "request_count", "duration_ms",
+)
 _current_usage: ContextVar["UsageTracker | None"] = ContextVar("current_usage", default=None)
 
 
@@ -71,6 +76,11 @@ class UsageTracker:
             ),
             "calls": calls,
         }
+
+    def summary(self) -> dict[str, Any]:
+        """The turn's token use in brief: totals over every Gemini call, without the per-call list."""
+        usage = self.as_dict()
+        return {key: usage[key] for key in SUMMARY_KEYS}
 
 
 def _sum(calls: list[dict[str, Any]], key: str) -> int | None:

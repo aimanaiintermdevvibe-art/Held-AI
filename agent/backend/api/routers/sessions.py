@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from backend.db import repository
 from backend.core.auth import AccessTokenPayload, require_auth
+from backend.core.config import get_settings
 from backend.schemas.sessions import (
     ChatSessionResponse,
     ChatMessageResponse,
@@ -63,6 +64,11 @@ async def get_messages(session_id: str, request: Request) -> Dict[str, Any]:
             detail=f"Session '{session_id}' not found.",
         )
     messages = await repository.get_session_messages(session_id)
+    if not get_settings().show_token_usage:  # replies keep their token use under metadata.usage
+        messages = [
+            {**m, "metadata": {k: v for k, v in (m.get("metadata") or {}).items() if k != "usage"}}
+            for m in messages
+        ]
     return {
         "session": session,
         "messages": messages,

@@ -502,7 +502,7 @@ def test_stream_chunks_and_done(api, monkeypatch):
     assert "event:" not in text
     assert '"index":' not in text
     assert '"done": true' in text
-    assert "usage" not in text
+    assert '"usage": {' in text  # the reply's token use comes with the done event
     # Extract chunk texts
     chunks = []
     for line in text.splitlines():
@@ -700,3 +700,50 @@ def test_writer_is_told_to_avoid_stock_phrases_and_follow_the_message():
     assert "Let the latest message decide the reply." in SYSTEM_PROMPT
     assert "Do not use formulaic sympathy" in SYSTEM_PROMPT
     assert "are exactly right" not in SYSTEM_PROMPT  # the old advice to open with "I'm so sorry about..."
+
+
+class _GeminiUsage:
+    """usage_metadata of one Gemini call."""
+    prompt_token_count, candidates_token_count, thoughts_token_count = 1200, 150, 40
+    cached_content_token_count, total_token_count = 0, 1390
+
+
+@pytest.fixture
+def counted(api, monkeypatch):
+    """The api client, with each reply costing one Gemini call of _GeminiUsage."""
+    from backend.ai_wrapper.usage import record_usage
+
+    client, _ = api
+    real_run = agentic.pipeline.run
+
+    async def run(**kwargs):
+        record_usage("gemini-3.5-flash-lite", _GeminiUsage(), 12.0)
+        return await real_run(**kwargs)
+
+    monkeypatch.setattr(agentic.pipeline, "run", run)
+    return client
+
+
+def test_each_reply_carries_its_token_use(counted):
+    data = counted.post("/agentic/run", json={"prompt": "I feel lonely."}).json()
+    usage = data["usage"]
+    assert (usage["input_tokens"], usage["output_tokens"], usage["thinking_tokens"], usage["total_tokens"]) == (1200, 150, 40, 1390)
+    assert usage["request_count"] == 1 and usage["estimated_cost_usd"] > 0 and "calls" not in usage
+
+    messages = counted.get(f"/agentic/sessions/{data['session_id']}/messages").json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert "usage" not in messages[0]["metadata"]  # tokens are spent on the reply
+    assert messages[1]["metadata"]["usage"] == usage
+
+    stream = counted.post("/agentic/stream", json={"prompt": "Still lonely.", "session_id": data["session_id"]}).text
+    done = [json.loads(line[6:]) for line in stream.splitlines() if line.startswith("data: ") and '"done": true' in line][0]
+    assert done["usage"]["total_tokens"] == 1390
+
+
+def test_token_use_can_be_hidden_but_is_still_stored(counted, fake_repo, monkeypatch):
+    monkeypatch.setattr(agentic.settings, "show_token_usage", False)
+    data = counted.post("/agentic/run", json={"prompt": "I feel lonely."}).json()
+    assert "usage" not in data
+    messages = counted.get(f"/agentic/sessions/{data['session_id']}/messages").json()["messages"]
+    assert "usage" not in messages[1]["metadata"]
+    assert fake_repo.messages[data["session_id"]][1]["metadata"]["usage"]["total_tokens"] == 1390

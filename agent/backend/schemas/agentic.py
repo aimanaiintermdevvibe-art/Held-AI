@@ -18,5 +18,6 @@ class AgenticRunResponse(BaseModel):
     response: str
     session_id: Optional[str] = None
     session: Optional[Dict[str, Any]] = None
+    usage: Optional[Dict[str, Any]] = None  # this reply's token use (SHOW_TOKEN_USAGE)
     # Passages from the user's uploaded documents that this reply was given (RAG).
     sources: Optional[List[Dict[str, Any]]] = None
