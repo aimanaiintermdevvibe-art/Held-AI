@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from backend.db.connection import get_db_pool
+from backend.db.recall import recalled_chat, recalled_message, search_terms
 
 logger = logging.getLogger("held_ai.repository")
 
@@ -695,6 +696,65 @@ async def mark_safety_check_in(session_id: str, raised_until: str) -> None:
             """,
             session_key, raised_until,
         )
+
+
+async def get_user_memory(user_id: str) -> Optional[str]:
+    """The user memory (public.user_memory, migration 006)."""
+    pool = await get_db_pool()
+    if not pool or not user_id:
+        return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT summary FROM public.user_memory WHERE user_id = $1", user_id.strip())
+
+
+async def search_past_conversations(
+    user_id: str, query: str, exclude_session_id: Optional[str] = None, limit: int = 5, days: int = 365,
+) -> List[Dict[str, Any]]:
+    """What the user's other chats (of the last `days`) said about query, best match first and
+    newest on a tie, with the reply that followed a user's message; both sides are searched.
+    With no searchable words, the latest three chats instead."""
+    pool = await get_db_pool()
+    if not pool or not user_id:
+        return []
+    terms = search_terms(query)
+    async with pool.acquire() as conn:
+        if terms:
+            rows = await conn.fetch(
+                """
+                WITH mine AS (
+                    SELECT s.title, m.role, m.content, m.created_at AS at,
+                           lead(m.role) OVER w AS next_role, lead(m.content) OVER w AS next_content
+                    FROM public.chat_messages m JOIN public.chat_sessions s ON s.id = m.session_id
+                    WHERE s.user_id = $1 AND ($2::uuid IS NULL OR s.id <> $2)
+                      AND m.created_at > now() - make_interval(days => $5)
+                    WINDOW w AS (PARTITION BY m.session_id ORDER BY m.created_at, m.id)
+                ), q AS (SELECT to_tsquery('english', $3) AS query)
+                SELECT title, role, left(content, 500) AS content, at,
+                       CASE WHEN role = 'user' AND next_role = 'assistant' THEN left(next_content, 500) END AS reply
+                FROM mine, q
+                WHERE to_tsvector('english', content) @@ q.query
+                ORDER BY ts_rank(to_tsvector('english', content), q.query) DESC, at DESC
+                LIMIT $4
+                """,
+                user_id.strip(), _uuid(exclude_session_id), terms, limit, days,
+            )
+            return [recalled_message(r["title"], _iso(r["at"]), r["role"], r["content"], r["reply"]) for r in rows]
+        rows = await conn.fetch(
+            """
+            SELECT s.title, s.updated_at AS at, s.session_summary AS summary,
+                   (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, 300))
+                                    ORDER BY m.created_at, m.id)
+                    FROM (SELECT role, content, created_at, id FROM public.chat_messages
+                          WHERE session_id = s.id ORDER BY created_at DESC, id DESC LIMIT 4) m) AS recent
+            FROM public.chat_sessions s
+            WHERE s.user_id = $1 AND ($2::uuid IS NULL OR s.id <> $2)
+              AND EXISTS (SELECT 1 FROM public.chat_messages m WHERE m.session_id = s.id)
+            ORDER BY s.updated_at DESC NULLS LAST
+            LIMIT 3
+            """,
+            user_id.strip(), _uuid(exclude_session_id),
+        )
+    return [recalled_chat(r["title"], _iso(r["at"]), r["summary"], _json(r["recent"])) for r in rows]
 
 
 def _schema_aware(function):

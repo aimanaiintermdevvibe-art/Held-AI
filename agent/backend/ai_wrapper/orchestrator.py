@@ -16,9 +16,11 @@ from backend.ai_wrapper.memory import (
     SAFETY_CHECK_IN_FEEDBACK,
     audit_view,
     current_chat,
+    mentions_earlier_chats,
     reasks_who_is_with_them,
     repeats_safety_check_in,
     routing_view,
+    with_recalled,
 )
 from backend.ai_wrapper.profile import user_context
 from backend.core.config import Settings
@@ -145,6 +147,7 @@ class AgenticPipeline:
         self, *, prompt: str, memory: dict | None = None, profile: dict | None = None,
         documents: list[dict] | None = None,
         notes: list[dict] | None = None,
+        recall: "Callable[[str], Awaitable[list[dict]]] | None" = None,
     ) -> str:
         """profile is the user's Held profile; its onboarding answers select one of the four
         user modes (myself/caregiver x diagnosed/undiagnosed) for reasoning, writing and review.
@@ -164,6 +167,10 @@ class AgenticPipeline:
         # Routing never sees other chats, so an old topic cannot turn a new message into a crisis.
         intent = await self.intent_agent.run(message=prompt, memory=routing_view(memory))
         mode = MODES[intent.category]
+        # recall searches the user's earlier chats; only when the message refers back to one.
+        if recall and (intent.refers_to_earlier_chats or mentions_earlier_chats(prompt)):
+            memory = with_recalled(memory, await recall(intent.recall_query or prompt), prompt)
+            reply["memory"] = memory
 
         if mode == "grief":
             analysis = await self.reasoning_agent.run_grief(

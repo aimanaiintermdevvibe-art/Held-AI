@@ -188,6 +188,30 @@ class FakeRepo:
             })
         return recaps
 
+    async def get_user_memory(self, user_id):
+        self.ops.append("get_user_memory")
+        return self.user_memory.get(user_id)
+
+    async def search_past_conversations(self, user_id, query, exclude_session_id=None, limit=5, **_):
+        from backend.db.recall import recalled_chat, recalled_message, search_terms
+
+        self.ops.append("search_past_conversations")
+        words = [w for w in search_terms(query).split(" | ") if w]
+        chats = [s for sid, s in self.sessions.items()
+                 if s["user_id"] == user_id and sid != exclude_session_id and self.messages[sid]]
+        chats.sort(key=lambda s: s["updated_at"], reverse=True)
+        if not words:
+            return [recalled_chat(s["title"], s["updated_at"], s["session_summary"], self.messages[s["id"]][-4:])
+                    for s in chats[:3]]
+        found = []
+        for s in chats:
+            msgs = self.messages[s["id"]]
+            for i, m in enumerate(msgs):
+                if any(w in m["content"].lower() for w in words):
+                    reply = msgs[i + 1]["content"] if m["role"] == "user" and i + 1 < len(msgs) else None
+                    found.append(recalled_message(s["title"], m["created_at"], m["role"], m["content"], reply))
+        return found[:limit]
+
     async def mark_safety_check_in(self, session_id, raised_until):
         self.ops.append("mark_safety_check_in")
         self.check_ins[session_id] = raised_until
@@ -228,7 +252,7 @@ def fake_repo(monkeypatch):
     for name in (
         "get_auth_user", "create_chat_session", "get_chat_session", "get_session_messages",
         "open_chat", "get_messages_after", "save_turn", "save_session_summary", "save_user_memory",
-        "get_previous_conversations", "mark_safety_check_in",
+        "get_previous_conversations", "mark_safety_check_in", "get_user_memory", "search_past_conversations",
         "list_chat_sessions", "delete_chat_session", "ping_database", "get_database_overview",
         "list_users", "get_user_by_id", "create_user_from_profile",
     ):

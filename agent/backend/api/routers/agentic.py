@@ -183,8 +183,10 @@ async def _open_conversation(payload: AgenticRunRequest, principal: AccessTokenP
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not start a conversation. Please try again.",
         )
-    previous = await _previous_conversations(session)
-    return _Chat(session, [], build_context([], session, previous=previous), is_new=True, previous=previous)
+    previous, earlier = await asyncio.gather(_previous_conversations(session), _user_memory(session["user_id"]))
+    return _Chat(
+        session, [], build_context([], session, previous=previous, earlier=earlier), is_new=True, previous=previous,
+    )
 
 
 @router.post(
@@ -208,7 +210,7 @@ async def run_agentic(payload: AgenticRunRequest, request: Request) -> AgenticRu
                 response = await pipeline.run(
                     prompt=payload.prompt, memory=chat.memory, profile=profile,
                     # documents=as_excerpts(retrieved),  # RAG disabled
-                    notes=notes,
+                    notes=notes, recall=_recall_for(chat),
                 )
     except Exception as exc:
         log_usage("failed_turn", tracker, session=session["id"])
@@ -249,7 +251,7 @@ async def stream_agentic(payload: AgenticRunRequest, request: Request) -> Stream
                     response = await pipeline.run(
                         prompt=payload.prompt, memory=chat.memory, profile=profile,
                         # documents=as_excerpts(retrieved),  # RAG disabled
-                        notes=notes,
+                        notes=notes, recall=_recall_for(chat),
                     )
         except Exception as exc:
             log_usage("failed_turn", tracker, session=session["id"])
@@ -292,6 +294,30 @@ async def _profile(request: Request, principal: AccessTokenPayload) -> dict:
     if profile is not None:
         return profile
     return await fetch_user_profile(request.state.access_token, principal["user_id"])
+
+
+async def _user_memory(user_id: str) -> str | None:
+    """The user memory, background for a new chat's first reply."""
+    try:
+        return await repository.get_user_memory(user_id)
+    except Exception as exc:
+        logger.warning("Could not load the user memory: %s", exc)
+        return None
+
+
+def _recall_for(chat: "_Chat"):
+    """Search the user's other chats, for a message that refers back to one."""
+
+    async def recall(query: str) -> list[dict]:
+        try:
+            return await repository.search_past_conversations(
+                chat.session["user_id"], query, exclude_session_id=chat.session["id"],
+            )
+        except Exception as exc:
+            logger.warning("Could not search earlier chats: %s", exc)
+            return []
+
+    return recall
 
 
 async def _previous_conversations(session: dict) -> list[dict]:

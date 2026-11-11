@@ -8,6 +8,16 @@ IntentCategory = Literal["CLINICAL_QUERY", "GENERAL_SUPPORT", "GRIEF_WORKBOOK", 
 class IntentDecision(BaseModel):
     category: IntentCategory
     reasoning: str = Field(description="A short, non-sensitive routing explanation")
+    refers_to_earlier_chats: bool = Field(
+        default=False,
+        description="True when the latest message refers to something from the user's earlier, separate chats "
+                    "that is not in conversation_memory",
+    )
+    recall_query: str = Field(
+        default="",
+        description="When refers_to_earlier_chats: 2-6 plain keywords for what to look up; empty for a general "
+                    "'what did we talk about'",
+    )
 
 class ClinicalAnalysis(BaseModel):
     """Structured reading of a mental-health concern. Never used for grief."""

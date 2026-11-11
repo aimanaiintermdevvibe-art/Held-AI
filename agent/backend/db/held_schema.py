@@ -28,6 +28,7 @@ import httpx
 
 from backend.core.config import get_settings
 from backend.db.connection import get_db_pool
+from backend.db.recall import recalled_chat, recalled_message, search_terms
 
 logger = logging.getLogger("held_ai.held_schema")
 
@@ -41,7 +42,7 @@ SESSION_COLUMNS = """
 __all__ = [
     "list_chat_sessions", "create_chat_session", "get_chat_session", "save_session_summary",
     "delete_chat_session", "get_session_messages", "open_chat", "get_messages_after", "save_turn",
-    "save_user_memory", "get_previous_conversations", "mark_safety_check_in", "list_users", "get_user_by_id", "get_auth_user",
+    "save_user_memory", "get_previous_conversations", "mark_safety_check_in", "get_user_memory", "search_past_conversations", "list_users", "get_user_by_id", "get_auth_user",
     "create_user_from_profile", "list_diseases", "upsert_diseases", "ping_database", "get_database_overview",
 ]
 
@@ -345,6 +346,71 @@ async def mark_safety_check_in(session_id: str, raised_until: str) -> None:
     merge = _set_memory("'safety_raised_until', $2::text")
     async with pool.acquire() as conn:
         await conn.execute(f'UPDATE "ChatSession" SET metadata = {merge} WHERE id = $1', key, raised_until)
+
+
+async def get_user_memory(user_id: str) -> Optional[str]:
+    """The user memory (a short summary of their recent chats), kept on their newest chat that has one."""
+    pool = await get_db_pool()
+    if not pool or not user_id:
+        return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            f"""SELECT metadata -> '{MEMORY_KEY}' ->> 'user_memory' FROM "ChatSession"
+                WHERE "userId" = $1 AND metadata -> '{MEMORY_KEY}' ? 'user_memory'
+                ORDER BY "updatedAt" DESC LIMIT 1""",
+            user_id.strip(),
+        )
+
+
+async def search_past_conversations(
+    user_id: str, query: str, exclude_session_id: Optional[str] = None, limit: int = 5, days: int = 365,
+) -> List[Dict[str, Any]]:
+    """What the user's other chats (of the last `days`) said about query, best match first and
+    newest on a tie: each message with its chat's title and date, and, for the user's message,
+    the reply that followed. Both sides are searched, so a plan the assistant suggested can be
+    recalled. With no searchable words, the latest three chats instead."""
+    pool = await get_db_pool()
+    if not pool or not user_id:
+        return []
+    terms = search_terms(query)
+    async with pool.acquire() as conn:
+        if terms:
+            rows = await conn.fetch(
+                f"""
+                WITH mine AS (
+                    SELECT s.title, m.role, m.content, m."createdAt" AS at,
+                           lead(m.role) OVER w AS next_role, lead(m.content) OVER w AS next_content
+                    FROM "ChatMessage" m JOIN "ChatSession" s ON s.id = m."sessionId"
+                    WHERE s."userId" = $1 AND ($2::text IS NULL OR s.id <> $2)
+                      AND m."createdAt" > {NOW} - make_interval(days => $5)
+                    WINDOW w AS (PARTITION BY m."sessionId" ORDER BY m."createdAt", m.id)
+                ), q AS (SELECT to_tsquery('english', $3) AS query)
+                SELECT title, role, left(content, 500) AS content, at,
+                       CASE WHEN role = 'user' AND next_role = 'assistant' THEN left(next_content, 500) END AS reply
+                FROM mine, q
+                WHERE to_tsvector('english', content) @@ q.query
+                ORDER BY ts_rank(to_tsvector('english', content), q.query) DESC, at DESC
+                LIMIT $4
+                """,
+                user_id.strip(), _key(exclude_session_id), terms, limit, days,
+            )
+            return [recalled_message(r["title"], _iso(r["at"]), r["role"], r["content"], r["reply"]) for r in rows]
+        rows = await conn.fetch(
+            """
+            SELECT s.title, s."updatedAt" AS at, s."sessionSummary" AS summary,
+                   (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, 300))
+                                    ORDER BY m."createdAt", m.id)
+                    FROM (SELECT role, content, "createdAt", id FROM "ChatMessage"
+                          WHERE "sessionId" = s.id ORDER BY "createdAt" DESC, id DESC LIMIT 4) m) AS recent
+            FROM "ChatSession" s
+            WHERE s."userId" = $1 AND ($2::text IS NULL OR s.id <> $2)
+              AND EXISTS (SELECT 1 FROM "ChatMessage" m WHERE m."sessionId" = s.id)
+            ORDER BY s."updatedAt" DESC
+            LIMIT 3
+            """,
+            user_id.strip(), _key(exclude_session_id),
+        )
+    return [recalled_chat(r["title"], _iso(r["at"]), r["summary"], _json(r["recent"])) for r in rows]
 
 
 async def get_previous_conversations(

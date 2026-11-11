@@ -52,10 +52,11 @@ def test_no_history_means_no_memory():
     assert memory.with_memory("hi", None) == "hi"
 
 
-def test_previous_conversations_are_included_even_for_a_new_chat():
-    previous = [{"title": "Losing Max", "summary": None, "recent_messages": [{"role": "user", "content": "Max died."}]}]
-    context = memory.build_context([], None, previous=previous)
-    assert context == {"summary": None, "recent_messages": [], "previous_conversations": previous}
+def test_a_new_chat_is_not_handed_earlier_chats_only_the_user_memory():
+    ordinary = [{"title": "Losing Max", "summary": None, "recent_messages": [{"role": "user", "content": "Max died."}]}]
+    assert memory.build_context([], None, previous=ordinary) is None  # nothing it could bring up on its own
+    context = memory.build_context([], None, previous=ordinary, earlier="Their dog Max died.")
+    assert context == {"summary": None, "recent_messages": [], "earlier_conversations": "Their dog Max died."}
     assert "previous_conversations" not in memory.build_context(turns(2), None)
 
 
@@ -105,14 +106,18 @@ def chat(monkeypatch, fake_repo, auth):
     """Signed-in client whose pipeline records the memory each turn received."""
     seen: list = []
 
-    async def run(*, prompt, memory=None, profile=None, documents=None, notes=None):
+    recalls: list = []
+
+    async def run(*, prompt, memory=None, profile=None, documents=None, notes=None, recall=None):
         seen.append(memory)
+        recalls.append(recall)
         return f"Answer to: {prompt}"
 
     monkeypatch.setattr(agentic.pipeline, "run", run)
     monkeypatch.setattr(agentic, "generate_title", AsyncMock(return_value="Losing Max"))
     monkeypatch.setattr(agentic.settings, "agentic_stream_delay_seconds", 0.0)
     with TestClient(app, headers=auth("usr_1")) as client:
+        client.recalls = recalls
         yield client, seen
 
 
@@ -126,11 +131,15 @@ def test_memory_follows_the_conversation_and_carries_into_new_chats(chat, fake_r
     assert second["session_id"] == sid
     assert [m["content"] for m in seen[1]["recent_messages"]] == ["My dog Max died.", "Answer to: My dog Max died."]
 
-    third = client.post("/agentic/run", json={"prompt": "Do you remember me?"}).json()
+    third = client.post("/agentic/run", json={"prompt": "Do you remember my dog?"}).json()
     assert third["session_id"] != sid
-    previous = seen[2]["previous_conversations"]
-    assert previous[0]["title"] == "Losing Max"
-    assert previous[0]["recent_messages"][0]["content"] == "My dog Max died."
+    assert seen[2] is None  # a new chat is not handed the earlier one...
+    found = asyncio.run(client.recalls[2]("dog"))  # ...but finds it when the user refers back to it
+    assert (found[0]["chat"], found[0]["said_by"], found[0]["text"]) == ("Losing Max", "user", "My dog Max died.")
+    assert found[0]["your_reply"] == "Answer to: My dog Max died."
+    assert found[1]["said_by"] == "you"  # the assistant's own earlier words are searched too
+    assert asyncio.run(client.recalls[2]("holiday")) == []  # never something that was not said
+    assert all(f["text"] != "My dog Max died." for f in asyncio.run(client.recalls[1]("dog")))  # never its own chat
 
     session = fake_repo.sessions[sid]
     assert session["total_message_count"] == 4 and session["user_id"] == "usr_1"
@@ -183,9 +192,7 @@ def test_an_earlier_safety_concern_is_kept_beyond_the_recent_messages():
     said = [user("i want to die."), *(user(f"later message {i}") for i in range(8))]
     previous = [{"title": "Feeling low", "summary": None, "recent_messages": said[-6:], "user_messages": said}]
     [recap] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    assert recap["safety_concerns"] == ["i want to die."]
-    assert "user_messages" not in recap  # the full list is only used to find concerns
-    assert recap["recent_messages"] == said[-6:]
+    assert recap == {"title": "Feeling low", "safety_concerns": ["i want to die."]}  # only what may be raised
 
 
 @pytest.mark.parametrize("text", [
@@ -195,8 +202,7 @@ def test_an_earlier_safety_concern_is_kept_beyond_the_recent_messages():
 ])
 def test_ordinary_or_bereavement_messages_are_not_safety_concerns(text):
     previous = [{"title": "Chat", "summary": None, "recent_messages": [user(text)], "user_messages": [user(text)]}]
-    [recap] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    assert "safety_concerns" not in recap
+    assert memory.build_context([], None, previous=previous) is None
 
 
 def test_only_the_latest_safety_concerns_are_listed():
@@ -215,9 +221,7 @@ def test_a_new_chat_remembers_a_safety_concern_from_an_earlier_one(chat):
     client.post("/agentic/run", json={"prompt": "Do you remember our previous chat?"})
     [recap] = seen[-1]["previous_conversations"]
     assert recap["safety_concerns"] == ["Sometimes I want to die."]
-    assert [m["content"] for m in recap["recent_messages"]] == [
-        "I feel really low.", "Sometimes I want to die.", "My dad passed away.",
-    ]
+    assert "recent_messages" not in recap  # the rest of that chat is recalled only when asked
     # Routing still never sees other chats, so an old concern cannot reroute a new message.
     assert memory.current_chat(seen[-1]) is None
 
@@ -226,10 +230,8 @@ def test_safety_concerns_reach_only_the_first_reply_of_a_chat():
     said = [user("I want to die")]
     previous = [{"title": "Crisis", "summary": None, "recent_messages": said, "user_messages": said}]
     [first] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    [later] = memory.build_context(turns(2), None, previous=previous)["previous_conversations"]
     assert first["safety_concerns"] == ["I want to die"]
-    assert "safety_concerns" not in later
-    assert later["recent_messages"] == []  # the writer cannot find it in the recap either
+    assert "previous_conversations" not in memory.build_context(turns(2), None, previous=previous)
 
 
 def test_a_later_turn_in_a_chat_gets_no_safety_concern(chat):
@@ -247,20 +249,18 @@ def test_safety_concerns_older_than_six_days_are_not_raised(days_ago, raised):
     sent = datetime.now(timezone.utc) - timedelta(days=days_ago)
     said = [{**user("I want to die"), "created_at": sent.isoformat()}]
     previous = [{"title": "Crisis", "summary": None, "recent_messages": said, "user_messages": said}]
-    [recap] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    assert ("safety_concerns" in recap) is raised
-    assert (recap["recent_messages"] == said) is raised
+    context = memory.build_context([], None, previous=previous)
+    assert (context is not None and "safety_concerns" in context["previous_conversations"][0]) is raised
 
 
 def test_hiding_a_concern_keeps_the_rest_of_the_recap():
     said = [user("I want to die"), user("I got a new cat called Marigold.")]
     summary = "They spoke of dying. They got a cat."
     previous = [{"title": "Chat", "summary": summary, "recent_messages": said, "user_messages": said}]
-    [recap] = memory.build_context(turns(2), None, previous=previous)["previous_conversations"]
+    recap = memory._recap(previous[0], with_safety_concerns=False)  # as the user memory writer sees it
     assert recap["recent_messages"] == [said[1]]
     assert recap["summary"] == "They got a cat."
-    [first] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    assert first["summary"] == summary
+    assert memory._recap(previous[0])["summary"] == summary
 
 
 CHECKED_IN = {"recent_messages": [{"role": "assistant", "content": "I want to check in: **are you safe right now?**"}]}
@@ -282,16 +282,14 @@ def test_a_past_tense_disclosure_counts_as_a_safety_concern():
     said = [user("i wanted to die")]
     previous = [{"title": "Chat", "summary": None, "recent_messages": said, "user_messages": said}]
     [first] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    [later] = memory.build_context(turns(2), None, previous=previous)["previous_conversations"]
     assert first["safety_concerns"] == ["i wanted to die"]
-    assert later["recent_messages"] == []
 
 
 def test_a_summary_cannot_raise_a_concern_the_safety_check_never_flagged():
     said = [user("Thanks for listening.")]
     previous = [{"title": "Chat", "summary": "They asked about safety.", "recent_messages": said, "user_messages": said}]
-    [recap] = memory.build_context([], None, previous=previous)["previous_conversations"]
-    assert recap["summary"] is None and "safety_concerns" not in recap
+    assert memory.build_context([], None, previous=previous) is None
+    assert memory._recap(previous[0])["summary"] is None
 
 
 def test_writer_is_told_to_leave_past_hardships_alone_unless_the_user_raises_them():
@@ -304,7 +302,8 @@ def test_writer_is_told_to_leave_past_hardships_alone_unless_the_user_raises_the
 def test_writer_is_told_to_recall_earlier_chats_and_check_in_once():
     from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT
 
-    assert "answer from previous_conversations or earlier_conversations, not only from this chat" in SYSTEM_PROMPT
+    assert "answer from recalled_conversations and earlier_conversations" in SYSTEM_PROMPT
+    assert "Never bring up earlier conversations on your own" in SYSTEM_PROMPT
     assert "safety_concerns" in SYSTEM_PROMPT and "check in about it once" in SYSTEM_PROMPT
     assert "Never mention a crisis, self-harm thoughts, or a painful loss from previous_conversations" not in SYSTEM_PROMPT
 
@@ -362,7 +361,7 @@ def test_the_user_memory_leaves_out_risk_talk():
 def test_each_turn_reads_and_writes_the_chat_once(chat, fake_repo):
     client, _ = chat
     sid = client.post("/agentic/run", json={"prompt": "Hello"}).json()["session_id"]
-    assert fake_repo.ops == ["create_chat_session", "get_previous_conversations", "save_turn"]
+    assert fake_repo.ops == ["create_chat_session", "get_previous_conversations", "get_user_memory", "save_turn"]
 
     fake_repo.ops.clear()
     client.post("/agentic/run", json={"prompt": "Work is hard.", "session_id": sid})
@@ -377,9 +376,11 @@ def test_a_new_chat_builds_the_user_memory_that_later_replies_use(chat, fake_rep
     client.post("/agentic/run", json={"prompt": "My dog Max died."})
 
     sid = client.post("/agentic/run", json={"prompt": "Hi again"}).json()["session_id"]
-    assert seen[-1]["previous_conversations"][0]["recent_messages"][0]["content"] == "My dog Max died."
+    assert seen[-1] is None  # the earlier chat itself is not handed to the new one
     client.get("/agentic/sessions")  # lets the background job finish
     assert fake_repo.user_memory == {"usr_1": "Their dog Max died."}
+    client.post("/agentic/run", json={"prompt": "Morning"})
+    assert seen[-1]["earlier_conversations"] == "Their dog Max died."  # a new chat knows it, as background
 
     client.post("/agentic/run", json={"prompt": "Do you remember Max?", "session_id": sid})
     assert seen[-1]["earlier_conversations"] == "Their dog Max died."
@@ -477,9 +478,7 @@ def test_a_concern_is_raised_once_for_the_whole_account():
     assert until == crisis["created_at"]
     # Later new chats see that mark on the chat that checked in, and raise nothing.
     checked = {"title": "Work", "summary": None, "recent_messages": [], "user_messages": [], "safety_raised_until": until}
-    later = memory.build_context([], None, previous=[checked, crisis_chat])["previous_conversations"]
-    assert all("safety_concerns" not in r for r in later)
-    assert all("safety_raised_until" not in r for r in later)  # internal, never shown to the agents
+    assert memory.build_context([], None, previous=[checked, crisis_chat]) is None
     assert memory.newest_concern_to_raise([checked, crisis_chat]) is None
 
 
@@ -489,7 +488,7 @@ def test_a_new_concern_after_the_check_in_is_raised_again():
     chats = [{"title": "Again", "summary": None, "recent_messages": [new], "user_messages": [new]}, checked,
              {"title": "First", "summary": None, "recent_messages": [old], "user_messages": [old]}]
     recaps = memory.build_context([], None, previous=chats)["previous_conversations"]
-    assert recaps[0]["safety_concerns"] == ["I want to end my life"] and "safety_concerns" not in recaps[2]
+    assert recaps == [{"title": "Again", "safety_concerns": ["I want to end my life"]}]  # internal mark never shown
     assert memory.newest_concern_to_raise(chats) == new["created_at"]
 
 
@@ -507,4 +506,27 @@ def test_writer_asks_about_ambiguous_words_and_bolds_crisis_questions():
 
     assert '"I feel high"' in SYSTEM_PROMPT and "never assume drug use or a crisis" in SYSTEM_PROMPT
     assert "Bold every question you ask, as in all replies." in SYSTEM_PROMPT
+
+
+def test_recalled_excerpts_cannot_restart_a_safety_check_in():
+    found = [
+        {"chat": "Shifts", "said_by": "user", "text": "My manager keeps adding extra shifts.",
+         "your_reply": "That is a lot. Last time you shared thoughts of ending your life. **Are you safe right now?**"},
+        {"chat": "Crisis", "said_by": "user", "text": "I am going to attempt suicide."},
+        {"chat": "Recent", "summary": "They felt low. Safety answers: a friend was with them.",
+         "last_messages": [{"said_by": "user", "text": "I want to die"}, {"said_by": "you", "text": "Grandma's bread sounds lovely."}]},
+    ]
+    cleaned = memory.clean_recalled(found, "A few days ago I told you about my manager. It's resolved now.")
+    assert cleaned == [
+        {"chat": "Shifts", "said_by": "user", "text": "My manager keeps adding extra shifts.", "your_reply": "That is a lot."},
+        {"chat": "Recent", "summary": "They felt low.", "last_messages": [{"said_by": "you", "text": "Grandma's bread sounds lovely."}]},
+    ]
+    # Kept when the user's own message is about it.
+    assert memory.clean_recalled(found, "Remember when I said I wanted to die?") == found
+
+
+def test_the_writer_checks_in_only_from_safety_concerns():
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT
+
+    assert "never because of recalled_conversations or earlier_conversations" in SYSTEM_PROMPT
 

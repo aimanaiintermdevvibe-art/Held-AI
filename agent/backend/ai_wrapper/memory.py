@@ -18,11 +18,11 @@ REASONING_MESSAGES = 10
 MESSAGE_CHAR_LIMIT = 4000  # a longer stored message keeps its start and end
 MEMORY_NOTE = (
     "\nconversation_memory holds earlier turns of this conversation (a rolling summary of older "
-    "turns when the chat is long, plus the latest messages). About this user's other recent "
-    "conversations it holds either previous_conversations, recaps newest first (title, summary "
-    "when there is one, the user's own recent messages, and safety_concerns: their messages there "
-    "that the safety check flagged, such as thoughts of dying or self-harm), or "
-    "earlier_conversations, a short summary of them that may also cover this chat. Treat it the "
+    "turns when the chat is long, plus the latest messages). About the user's other, earlier "
+    "conversations it may hold earlier_conversations, a short memory of them (background only); "
+    "recalled_conversations, excerpts from earlier chats that the latest message refers back to; "
+    "and, in a new chat's first reply, previous_conversations with safety_concerns: messages there "
+    "that the safety check flagged, such as thoughts of dying or self-harm. Treat it the "
     "way a person remembers earlier conversations "
     "with someone: background that lets you understand references like \"he\", \"that\" or \"what "
     "we discussed\", and avoid asking for details already given. Respond to latest_prompt as the "
@@ -144,19 +144,104 @@ def build_context(
     window = messages[-RECENT_MESSAGES:]
     has_older = max(session.get("total_message_count") or 0, len(messages)) > len(window)
     summary = session.get("session_summary") if has_older else None
-    if not window and not summary and not previous and not earlier:
+    # A new chat may be about anything, so it is not handed the earlier chats themselves (they are
+    # recalled when the user refers back to one); only concerns still to check in on reach it,
+    # and only its first reply, so the check-in cannot repeat within a chat.
+    concerns = []
+    if previous and not messages:
+        checked_until = _checked_in_until(previous)
+        concerns = [r for r in (_concern_recap(c, checked_until) for c in previous) if r]
+    if not window and not summary and not concerns and not earlier:
         return None
     context = {"summary": summary, "recent_messages": [_turn(m) for m in window]}
-    if previous:
-        # Concerns reach only a chat's first reply, so the check-in cannot repeat within a chat.
-        checked_until = _checked_in_until(previous)
-        context["previous_conversations"] = [
-            _recap(conversation, with_safety_concerns=not messages, checked_until=checked_until)
-            for conversation in previous
-        ]
-    elif earlier:
+    if concerns:
+        context["previous_conversations"] = concerns
+    if earlier:
         context["earlier_conversations"] = earlier
     return context
+
+
+def _concern_recap(conversation: dict, checked_until: str | None) -> dict | None:
+    """An earlier chat as a new chat's first reply sees it: only the safety concerns still to
+    raise there (none: the chat is left out)."""
+    raised = [m["content"] for m in _flagged(conversation) if _to_raise(m, checked_until)]
+    if not raised:
+        return None
+    recap = {key: conversation[key] for key in ("title", "last_active") if conversation.get(key)}
+    recap["safety_concerns"] = raised[-SAFETY_CONCERNS_PER_CONVERSATION:]
+    return recap
+
+
+# The latest message points back to an earlier chat ("last time", "you suggested", "remember").
+_REFERS_TO_EARLIER = re.compile(
+    r"\b(?:previous|last|other|earlier|old|another)\s+(?:chat|conversation|session)s?\b"
+    r"|\b(?:last time|the other day|(?:a )?few days ago|days ago|weeks? ago|months? ago|yesterday|last (?:week|month|night))\b"
+    r"|\bi (?:told|mentioned|said to|shared with|asked) you\b|\byou (?:told|suggested|said|gave|recommended|mentioned)\b"
+    r"|\bwe (?:talked|discussed|spoke|planned|made|came up)\b|\bdo you remember\b|\bremember (?:when|what|the|my|our)\b",
+    re.IGNORECASE,
+)
+
+
+def mentions_earlier_chats(text: str) -> bool:
+    return bool(_REFERS_TO_EARLIER.search(text or ""))
+
+
+# Safety talk in earlier chats: the user's risk, and the assistant's own check-ins about it.
+_CHECK_IN_TALK = re.compile(
+    r"\b(?:suicid\w*|self[- ]harm\w*|overdos\w*|crisis|safety|"
+    r"kill(?:ing)? (?:myself|yourself|themselves|himself|herself)|"
+    r"end(?:ing)? (?:my|your|their|his|her) (?:own )?life|"
+    r"thoughts? (?:of|about) (?:dying|death|suicide|ending)|want(?:ed|s|ing)? to die|"
+    r"(?:are|feel|feeling|staying|whether you(?:'re| are| feel)?)\s+(?:you\s+)?safe)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_risk(text: str) -> bool:
+    from backend.ai_wrapper.agents.agent1_intent_guardrail.policy import has_immediate_crisis_language
+
+    return bool(has_immediate_crisis_language(text or "") or _PAST_RISK.search(text or "") or _CHECK_IN_TALK.search(text or ""))
+
+
+def _without_check_in_talk(text: str | None) -> str | None:
+    if not text:
+        return text
+    kept = [s for s in re.split(r"(?<=[.!?])\s+", text) if not _CHECK_IN_TALK.search(s)]
+    return " ".join(kept) or None
+
+
+def clean_recalled(found: list[dict], prompt: str) -> list[dict]:
+    """Recalled excerpts without safety talk, so a recall never restarts a check-in (that comes
+    only from previous_conversations, once). Kept when the latest message is itself about it."""
+    if _is_risk(prompt):
+        return found
+    cleaned = []
+    for item in found:
+        if item.get("said_by") == "user" and _is_risk(item.get("text") or ""):
+            continue
+        item = dict(item)
+        for key in ("text", "your_reply", "summary"):
+            if key in item:
+                item[key] = _without_check_in_talk(item[key])
+        if "last_messages" in item:
+            item["last_messages"] = [
+                {**m, "text": _without_check_in_talk(m.get("text"))} for m in item["last_messages"]
+                if not (m.get("said_by") == "user" and _is_risk(m.get("text") or ""))
+            ]
+            item["last_messages"] = [m for m in item["last_messages"] if m["text"]]
+        if not item.get("text") and not item.get("summary") and not item.get("last_messages"):
+            continue
+        cleaned.append({k: v for k, v in item.items() if v not in (None, [])})
+    return cleaned
+
+
+def with_recalled(memory: dict | None, found: list[dict], prompt: str = "") -> dict | None:
+    """memory plus recalled_conversations: what the user's earlier chats said about what the
+    latest message refers back to (safety talk left out, see clean_recalled)."""
+    found = clean_recalled(found or [], prompt)
+    if not found:
+        return memory
+    return {**(memory or {"summary": None, "recent_messages": []}), "recalled_conversations": found}
 
 
 def _recent_enough_to_raise(message: dict) -> bool:
@@ -316,7 +401,7 @@ def audit_view(memory: dict | None) -> dict | None:
         return None
     view = dict(memory)
     view["recent_messages"] = [m for m in memory.get("recent_messages") or [] if m.get("role") == "user"]
-    keys = ("summary", "recent_messages", "previous_conversations", "earlier_conversations")
+    keys = ("summary", "recent_messages", "previous_conversations", "earlier_conversations", "recalled_conversations")
     return view if any(view.get(key) for key in keys) else None
 
 

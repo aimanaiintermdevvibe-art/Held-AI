@@ -776,7 +776,7 @@ def test_only_the_first_new_chat_after_a_concern_checks_in(fake_repo, auth, monk
     """A check-in about an earlier concern is stored, and later new chats no longer get it."""
     seen = []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None):
+    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None):
         recaps = (memory or {}).get("previous_conversations") or []
         concerns = [c for r in recaps for c in r.get("safety_concerns", [])]
         seen.append(concerns)
@@ -791,4 +791,64 @@ def test_only_the_first_new_chat_after_a_concern_checks_in(fake_repo, auth, monk
         client.post("/agentic/run", json={"prompt": "I baked bread today."})    # no check-in now
     assert seen[1] == ["I want to kill myself"] and seen[2] == []
     assert list(fake_repo.check_ins.values()) and "mark_safety_check_in" in fake_repo.ops
+
+
+RECALLED = [{"chat": "Night shifts", "date": "2026-11-11", "said_by": "you", "text": "Try keeping the room cool."}]
+
+
+def _recaller(asked):
+    async def recall(query):
+        asked.append(query)
+        return RECALLED
+    return recall
+
+
+def test_earlier_chats_are_searched_only_when_the_message_refers_back(monkeypatch):
+    provider = FakeProvider()
+    pipeline = AgenticPipeline(provider, Settings(_env_file=None))
+    asked = []
+    asyncio.run(pipeline.run(prompt="How do I make chai?", recall=_recaller(asked)))
+    assert asked == [] and "recalled_conversations" not in json.dumps(provider.payloads[-1])
+
+    asyncio.run(pipeline.run(prompt="A few days ago you suggested something for my sleep. What was it?",
+                             recall=_recaller(asked)))
+    assert len(asked) == 1  # the wording alone is enough
+    assert provider.payloads[-1]["conversation_memory"]["recalled_conversations"] == RECALLED
+    audit = [json.loads(text) for model, text in provider.structured_inputs if model is AuditDecision][-1]
+    assert audit["conversation_memory"]["recalled_conversations"] == RECALLED  # so it is not taken as invented
+
+
+def test_the_router_can_ask_for_a_recall_with_its_own_keywords(monkeypatch):
+    provider = FakeProvider()
+    pipeline = AgenticPipeline(provider, Settings(_env_file=None))
+
+    async def route(**_):
+        return IntentDecision(category="GENERAL_SUPPORT", reasoning="r", refers_to_earlier_chats=True,
+                              recall_query="manager extra shifts")
+
+    monkeypatch.setattr(pipeline.intent_agent, "run", route)
+    asked = []
+    asyncio.run(pipeline.run(prompt="That problem with my boss is sorted now.", recall=_recaller(asked)))
+    assert asked == ["manager extra shifts"]
+
+
+def test_router_and_writer_are_told_how_earlier_chats_work():
+    from backend.ai_wrapper.agents.agent1_intent_guardrail.prompt import SYSTEM_PROMPT as ROUTER
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT as WRITER
+
+    assert "refers_to_earlier_chats" in ROUTER and "recall_query" in ROUTER
+    assert "Never bring up earlier conversations on your own" in WRITER
+    assert "say honestly that you can't find it in your earlier chats" in WRITER
+    assert "If previous_conversations has safety_concerns" in WRITER
+
+
+@pytest.mark.parametrize("text, terms", [
+    ("A few days ago I told you about my manager adding extra shifts", "manager | adding | extra | shifts"),
+    ("Do you remember what we talked about last time?", ""),
+    ("the sleep strategy we planned", "sleep | strategy | planned"),
+])
+def test_search_words_skip_the_words_that_say_nothing(text, terms):
+    from backend.db.recall import search_terms
+
+    assert search_terms(text) == terms
 
