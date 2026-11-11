@@ -12,9 +12,11 @@ from backend.ai_wrapper.agents.agent4_compliance_auditor import ComplianceAudito
 from backend.ai_wrapper.client import GeminiClient
 from backend.ai_wrapper.memory import (
     REASONING_MESSAGES,
+    ANSWERED_WHO_IS_WITH_FEEDBACK,
     SAFETY_CHECK_IN_FEEDBACK,
     audit_view,
     current_chat,
+    reasks_who_is_with_them,
     repeats_safety_check_in,
     routing_view,
 )
@@ -112,6 +114,12 @@ class AgenticPipeline:
 
             if attempt < MAX_ATTEMPTS - 1 and mode != "crisis" and repeats_safety_check_in(draft, memory):
                 feedback = [SAFETY_CHECK_IN_FEEDBACK]
+                continue
+
+            # In a crisis, safety questions are right, but not one the user has already answered.
+            answered = reasks_who_is_with_them(draft, memory, prompt) if mode == "crisis" else None
+            if attempt < MAX_ATTEMPTS - 1 and answered:
+                feedback = [ANSWERED_WHO_IS_WITH_FEEDBACK.format(answer=answered.strip()[:200])]
                 continue
 
             audit = await self.audit_agent.run(

@@ -418,3 +418,46 @@ def test_the_router_also_sees_the_users_earlier_messages():
 def test_the_summary_keeps_facts_and_advice_already_given_apart():
     for part in ("Facts:", "Feelings and goals:", "Already suggested:", "checked on the user's safety"):
         assert part in memory.SUMMARY_PROMPT
+
+
+ASKED_WHO = {"role": "assistant", "content": "**Is there someone nearby who can be with you right now?**"}
+WHO_QUESTION = "Is there anyone who can be with you right now?"
+
+
+@pytest.mark.parametrize("draft, recent, prompt, summary, answered", [
+    (WHO_QUESTION, [ASKED_WHO, user("yes my friend is with me")], "I still feel like doing it.", None, "yes my friend is with me"),
+    (WHO_QUESTION, [ASKED_WHO, user("yes")], "I still want to.", None, "yes"),
+    (WHO_QUESTION, [user("I'm alone tonight")], "I can't do this", None, "I'm alone tonight"),
+    (WHO_QUESTION, [ASKED_WHO], "she is sitting right next to me", None, "she is sitting right next to me"),
+    (WHO_QUESTION, [ASKED_WHO], "no", None, "no"),
+    (WHO_QUESTION, [], "I still feel it.", "Facts: none. Safety answers: their sister is with them at home.", "Safety answers: their sister is with them at home."),
+    (WHO_QUESTION, [user("please stay with me")], "I feel empty.", None, None),
+    (WHO_QUESTION, [user("I feel empty")], "I want to end it.", None, None),
+    ("With your friend beside you, could you tell them how tonight feels?", [user("my friend is with me")], "ok", None, None),
+    (WHO_QUESTION, [], "I want to end my life.", None, None),
+])
+def test_a_crisis_reply_may_not_reask_who_is_with_the_user(draft, recent, prompt, summary, answered):
+    assert memory.reasks_who_is_with_them(draft, {"recent_messages": recent, "summary": summary}, prompt) == answered
+
+
+def test_safety_answers_are_kept_in_the_summary_and_hidden_from_later_chats():
+    assert "Safety answers:" in memory.SUMMARY_PROMPT
+    assert memory._without_safety_talk("They felt low. Safety answers: their friend is with them.") == "They felt low."
+
+
+def test_writer_is_told_not_to_reask_answered_safety_questions():
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT
+
+    assert "Never ask again about something they have already answered" in SYSTEM_PROMPT
+    assert "never reuse an earlier closing" in SYSTEM_PROMPT
+    assert "and whether someone can be with them. Do not reuse" not in SYSTEM_PROMPT  # the old, unconditional ask
+
+
+def test_no_agent_is_shown_a_gender_the_user_never_gave():
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT as WRITER
+    from backend.ai_wrapper.agents.agent4_compliance_auditor.prompt import SYSTEM_PROMPT as AUDITOR
+
+    assert "Never assume a detail the user has not given, such as a person's gender" in WRITER
+    assert "could you tell them how heavy tonight feels" in WRITER and "tell her how heavy" not in WRITER
+    assert "a gender, name or other detail about a person that the user never gave" in AUDITOR
+

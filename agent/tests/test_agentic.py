@@ -747,3 +747,27 @@ def test_token_use_can_be_hidden_but_is_still_stored(counted, fake_repo, monkeyp
     messages = counted.get(f"/agentic/sessions/{data['session_id']}/messages").json()["messages"]
     assert "usage" not in messages[1]["metadata"]
     assert fake_repo.messages[data["session_id"]][1]["metadata"]["usage"]["total_tokens"] == 1390
+
+
+def test_a_crisis_draft_that_reasks_who_is_with_the_user_is_rewritten(monkeypatch):
+    from backend.ai_wrapper.memory import build_context
+
+    pipeline = AgenticPipeline(FakeProvider(), Settings(_env_file=None))
+    drafts = iter(["**Is there someone who can be with you right now?**",
+                   "With your friend right there, could you tell them how heavy tonight feels?"])
+    feedback_seen = []
+
+    async def write(**kwargs):
+        feedback_seen.append(kwargs["audit_feedback"])
+        return next(drafts)
+
+    monkeypatch.setattr(pipeline.empathy_agent, "run", write)
+    chat = build_context([
+        {"id": "1", "role": "user", "content": "I am going to kill myself tonight."},
+        {"id": "2", "role": "assistant", "content": "**Is anyone with you right now?**"},
+        {"id": "3", "role": "user", "content": "yes my friend is with me"},
+    ])
+    reply = asyncio.run(pipeline.run(prompt="I still want to kill myself.", memory=chat))
+    assert reply.startswith("With your friend right there")
+    assert "already told you whether anyone is with them" in feedback_seen[1][0]
+
