@@ -70,6 +70,7 @@ class FakeRepo:
         self.sessions: dict[str, dict] = {}
         self.messages: dict[str, list[dict]] = {}
         self.user_memory: dict[str, str] = {}
+        self.check_ins: dict[str, str] = {}  # session id -> newest concern its check-in covered
         self.created_from_profiles: list[dict] = []
         self.ops: list[str] = []  # chat-related database calls, in order
 
@@ -183,8 +184,13 @@ class FakeRepo:
             recaps.append({
                 "title": s["title"], "last_active": s["updated_at"], "summary": s["session_summary"],
                 "recent_messages": user_messages[-6:], "user_messages": user_messages,
+                "safety_raised_until": self.check_ins.get(s["id"]),
             })
         return recaps
+
+    async def mark_safety_check_in(self, session_id, raised_until):
+        self.ops.append("mark_safety_check_in")
+        self.check_ins[session_id] = raised_until
 
     async def list_chat_sessions(self, user_id=None):
         return [
@@ -222,7 +228,7 @@ def fake_repo(monkeypatch):
     for name in (
         "get_auth_user", "create_chat_session", "get_chat_session", "get_session_messages",
         "open_chat", "get_messages_after", "save_turn", "save_session_summary", "save_user_memory",
-        "get_previous_conversations",
+        "get_previous_conversations", "mark_safety_check_in",
         "list_chat_sessions", "delete_chat_session", "ping_database", "get_database_overview",
         "list_users", "get_user_by_id", "create_user_from_profile",
     ):

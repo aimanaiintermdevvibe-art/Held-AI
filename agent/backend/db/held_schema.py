@@ -41,7 +41,7 @@ SESSION_COLUMNS = """
 __all__ = [
     "list_chat_sessions", "create_chat_session", "get_chat_session", "save_session_summary",
     "delete_chat_session", "get_session_messages", "open_chat", "get_messages_after", "save_turn",
-    "save_user_memory", "get_previous_conversations", "list_users", "get_user_by_id", "get_auth_user",
+    "save_user_memory", "get_previous_conversations", "mark_safety_check_in", "list_users", "get_user_by_id", "get_auth_user",
     "create_user_from_profile", "list_diseases", "upsert_diseases", "ping_database", "get_database_overview",
 ]
 
@@ -335,6 +335,18 @@ async def save_user_memory(user_id: str, summary: str) -> None:
         )
 
 
+async def mark_safety_check_in(session_id: str, raised_until: str) -> None:
+    """Store on this chat (in its metadata, never shown to clients) that its check-in covered
+    the user's earlier concerns up to raised_until."""
+    pool = await get_db_pool()
+    key = _key(session_id)
+    if not pool or not key:
+        return
+    merge = _set_memory("'safety_raised_until', $2::text")
+    async with pool.acquire() as conn:
+        await conn.execute(f'UPDATE "ChatSession" SET metadata = {merge} WHERE id = $1', key, raised_until)
+
+
 async def get_previous_conversations(
     user_id: str, exclude_session_id: Optional[str] = None, limit: int = 10, recent_messages: int = 6,
     content_chars: int = 600,
@@ -346,6 +358,7 @@ async def get_previous_conversations(
         rows = await conn.fetch(
             f"""
             SELECT s.id, s.title, s."sessionSummary" AS summary, s."updatedAt",
+                   s.metadata -> 'memory' ->> 'safety_raised_until' AS safety_raised_until,
                    (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, $5))
                                     ORDER BY m."createdAt", m.id)
                     FROM (SELECT role, content, "createdAt", id FROM "ChatMessage"
@@ -372,6 +385,7 @@ async def get_previous_conversations(
             "summary": r["summary"],
             "recent_messages": _json(r["recent"]) or [],
             "user_messages": [{**m, "created_at": _iso(m.get("created_at"))} for m in _json(r["user_messages"]) or []],
+            "safety_raised_until": r["safety_raised_until"],
         }
         for r in rows
     ]

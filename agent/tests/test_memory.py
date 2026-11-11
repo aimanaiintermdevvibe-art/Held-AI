@@ -461,3 +461,50 @@ def test_no_agent_is_shown_a_gender_the_user_never_gave():
     assert "could you tell them how heavy tonight feels" in WRITER and "tell her how heavy" not in WRITER
     assert "a gender, name or other detail about a person that the user never gave" in AUDITOR
 
+
+def _said(text, minutes_ago):
+    from datetime import datetime, timedelta, timezone
+    return {"role": "user", "content": text, "created_at": (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()}
+
+
+def test_a_concern_is_raised_once_for_the_whole_account():
+    crisis = _said("I am going to kill myself.", 60)
+    crisis_chat = {"title": "Crisis", "summary": None, "recent_messages": [crisis], "user_messages": [crisis]}
+    # The first new chat after the crisis raises it and then remembers how far its check-in went.
+    [first] = memory.build_context([], None, previous=[crisis_chat])["previous_conversations"]
+    assert first["safety_concerns"] == ["I am going to kill myself."]
+    until = memory.newest_concern_to_raise([crisis_chat])
+    assert until == crisis["created_at"]
+    # Later new chats see that mark on the chat that checked in, and raise nothing.
+    checked = {"title": "Work", "summary": None, "recent_messages": [], "user_messages": [], "safety_raised_until": until}
+    later = memory.build_context([], None, previous=[checked, crisis_chat])["previous_conversations"]
+    assert all("safety_concerns" not in r for r in later)
+    assert all("safety_raised_until" not in r for r in later)  # internal, never shown to the agents
+    assert memory.newest_concern_to_raise([checked, crisis_chat]) is None
+
+
+def test_a_new_concern_after_the_check_in_is_raised_again():
+    old, new = _said("I want to die", 120), _said("I want to end my life", 5)
+    checked = {"title": "Work", "summary": None, "recent_messages": [], "user_messages": [], "safety_raised_until": old["created_at"]}
+    chats = [{"title": "Again", "summary": None, "recent_messages": [new], "user_messages": [new]}, checked,
+             {"title": "First", "summary": None, "recent_messages": [old], "user_messages": [old]}]
+    recaps = memory.build_context([], None, previous=chats)["previous_conversations"]
+    assert recaps[0]["safety_concerns"] == ["I want to end my life"] and "safety_concerns" not in recaps[2]
+    assert memory.newest_concern_to_raise(chats) == new["created_at"]
+
+
+@pytest.mark.parametrize("reply, asks", [
+    ("Last time you shared thoughts of dying. **Are you safe right now?**", True),
+    ("I want to check in on how you are feeling and whether you are safe.", True),
+    ("Night shifts are brutal. **What helps you unwind?**", False),
+])
+def test_a_check_in_is_recognised(reply, asks):
+    assert memory.asks_about_safety(reply) is asks
+
+
+def test_writer_asks_about_ambiguous_words_and_bolds_crisis_questions():
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT
+
+    assert '"I feel high"' in SYSTEM_PROMPT and "never assume drug use or a crisis" in SYSTEM_PROMPT
+    assert "Bold every question you ask, as in all replies." in SYSTEM_PROMPT
+

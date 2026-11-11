@@ -149,8 +149,10 @@ def build_context(
     context = {"summary": summary, "recent_messages": [_turn(m) for m in window]}
     if previous:
         # Concerns reach only a chat's first reply, so the check-in cannot repeat within a chat.
+        checked_until = _checked_in_until(previous)
         context["previous_conversations"] = [
-            _recap(conversation, with_safety_concerns=not messages) for conversation in previous
+            _recap(conversation, with_safety_concerns=not messages, checked_until=checked_until)
+            for conversation in previous
         ]
     elif earlier:
         context["earlier_conversations"] = earlier
@@ -175,22 +177,64 @@ def _without_safety_talk(summary: str) -> str | None:
     return " ".join(kept) or None
 
 
-def _recap(conversation: dict, with_safety_concerns: bool = True) -> dict:
-    """A previous conversation as the agents see it. Besides the user's recent messages, it
-    can list their recent messages there that the local safety check flags (thoughts of dying,
-    self-harm, suicide), even when those came earlier, so a serious disclosure is not forgotten."""
+def _when(value: Any) -> datetime:
+    """An ISO time as an aware datetime; an unreadable one sorts first."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _checked_in_until(previous: list[dict] | None) -> str | None:
+    """The newest concern that a check-in in an earlier chat already covered (see
+    newest_concern_to_raise); concerns up to it are not raised again in any chat."""
+    marks = [c["safety_raised_until"] for c in previous or [] if c.get("safety_raised_until")]
+    return max(marks, key=_when) if marks else None
+
+
+def _flagged(conversation: dict) -> list[dict]:
+    """The user's messages in a conversation that the local safety check flags."""
     # Imported here: the agent modules import this one.
     from backend.ai_wrapper.agents.agent1_intent_guardrail.policy import has_immediate_crisis_language
 
-    recap = {key: value for key, value in conversation.items() if key != "user_messages"}
     messages = conversation.get("user_messages") or conversation.get("recent_messages") or []
-    flagged = [
+    return [
         m for m in messages
         if m.get("role", "user") == "user" and (
             has_immediate_crisis_language(m.get("content") or "") or _PAST_RISK.search(m.get("content") or "")
         )
     ]
-    raised = [m["content"] for m in flagged if with_safety_concerns and _recent_enough_to_raise(m)]
+
+
+def _to_raise(message: dict, checked_until: str | None) -> bool:
+    """Whether a flagged message may still be raised: recent enough, and newer than the last
+    check-in that covered earlier concerns."""
+    if not _recent_enough_to_raise(message):
+        return False
+    return checked_until is None or (message.get("created_at") and _when(message["created_at"]) > _when(checked_until))
+
+
+def newest_concern_to_raise(previous: list[dict] | None) -> str | None:
+    """The time of the newest earlier concern a new chat's first reply would raise; stored on
+    that chat once the reply checks in, so later chats do not raise the same concern again."""
+    checked_until = _checked_in_until(previous)
+    times = [m["created_at"] for c in previous or [] for m in _flagged(c)
+             if m.get("created_at") and _to_raise(m, checked_until)]
+    return max(times, key=_when) if times else None
+
+
+def asks_about_safety(text: str) -> bool:
+    return bool(_ASKS_ABOUT_SAFETY.search(text or ""))
+
+
+def _recap(conversation: dict, with_safety_concerns: bool = True, checked_until: str | None = None) -> dict:
+    """A previous conversation as the agents see it. Besides the user's recent messages, it
+    can list their recent messages there that the local safety check flags (thoughts of dying,
+    self-harm, suicide), even when those came earlier, so a serious disclosure is not forgotten."""
+    recap = {key: value for key, value in conversation.items() if key not in ("user_messages", "safety_raised_until")}
+    flagged = _flagged(conversation)
+    raised = [m["content"] for m in flagged if with_safety_concerns and _to_raise(m, checked_until)]
     if raised:
         recap["safety_concerns"] = raised[-SAFETY_CONCERNS_PER_CONVERSATION:]
     # A concern that may not be raised must not reach the writer through the recap either.

@@ -771,3 +771,24 @@ def test_a_crisis_draft_that_reasks_who_is_with_the_user_is_rewritten(monkeypatc
     assert reply.startswith("With your friend right there")
     assert "already told you whether anyone is with them" in feedback_seen[1][0]
 
+
+def test_only_the_first_new_chat_after_a_concern_checks_in(fake_repo, auth, monkeypatch):
+    """A check-in about an earlier concern is stored, and later new chats no longer get it."""
+    seen = []
+
+    async def run(*, prompt, memory=None, profile=None, notes=None):
+        recaps = (memory or {}).get("previous_conversations") or []
+        concerns = [c for r in recaps for c in r.get("safety_concerns", [])]
+        seen.append(concerns)
+        return "Last time you mentioned wanting to die. **Are you safe right now?**" if concerns else "Hello."
+
+    monkeypatch.setattr(agentic.pipeline, "run", run)
+    monkeypatch.setattr(agentic, "generate_title", AsyncMock(return_value="Title"))
+    monkeypatch.setattr(agentic, "fetch_user_profile", AsyncMock(return_value={}))
+    with TestClient(app, headers=auth("usr_1")) as client:
+        client.post("/agentic/run", json={"prompt": "I want to kill myself"})   # the crisis chat
+        client.post("/agentic/run", json={"prompt": "Work was long today."})    # checks in, once
+        client.post("/agentic/run", json={"prompt": "I baked bread today."})    # no check-in now
+    assert seen[1] == ["I want to kill myself"] and seen[2] == []
+    assert list(fake_repo.check_ins.values()) and "mark_safety_check_in" in fake_repo.ops
+

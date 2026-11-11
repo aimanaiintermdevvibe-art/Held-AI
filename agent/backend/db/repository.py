@@ -48,6 +48,12 @@ def _iso(value: Any) -> Optional[str]:
     return value.isoformat() if value else None
 
 
+def _client_metadata(value: Any) -> Any:
+    """A chat's metadata without the agent's own "memory" key, which clients never see."""
+    metadata = _json(value)
+    return {k: v for k, v in metadata.items() if k != "memory"} if isinstance(metadata, dict) else metadata
+
+
 def _session_dict(row: Any) -> Dict[str, Any]:
     anchor = row["last_summarized_message_id"]
     return {
@@ -55,7 +61,7 @@ def _session_dict(row: Any) -> Dict[str, Any]:
         "user_id": row["user_id"],
         "title": row["title"],
         "status": row["status"],
-        "metadata": _json(row["metadata"]),
+        "metadata": _client_metadata(row["metadata"]),
         "session_summary": row["session_summary"],
         "last_summarized_message_id": str(anchor) if anchor else None,
         "total_message_count": int(row["total_message_count"] or 0),
@@ -384,6 +390,7 @@ async def get_previous_conversations(
         rows = await conn.fetch(
             """
             SELECT s.id, s.title, s.session_summary, s.updated_at,
+                   s.metadata -> 'memory' ->> 'safety_raised_until' AS safety_raised_until,
                    (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, $5))
                                     ORDER BY m.created_at, m.id)
                     FROM (SELECT role, content, created_at, id FROM public.chat_messages
@@ -415,6 +422,7 @@ async def get_previous_conversations(
                 "summary": r["session_summary"],
                 "recent_messages": _json(r["recent"]) or [],
                 "user_messages": _json(r["user_messages"]) or [],
+                "safety_raised_until": r["safety_raised_until"],
             }
             for r in rows
         ]
@@ -669,6 +677,25 @@ async def get_database_overview() -> Dict[str, Any]:
 # function of the same name in held_schema.py; with the default "agent" schema
 # (Supabase), the functions above run unchanged.
 # ==============================================================================
+
+async def mark_safety_check_in(session_id: str, raised_until: str) -> None:
+    """Store on this chat (metadata -> 'memory', never shown to clients) that its check-in covered
+    the user's earlier concerns up to raised_until."""
+    pool = await get_db_pool()
+    session_key = _uuid(session_id)
+    if not pool or not session_key:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE public.chat_sessions
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                'memory', COALESCE(metadata -> 'memory', '{}'::jsonb) || jsonb_build_object('safety_raised_until', $2::text))
+            WHERE id = $1
+            """,
+            session_key, raised_until,
+        )
+
 
 def _schema_aware(function):
     @functools.wraps(function)

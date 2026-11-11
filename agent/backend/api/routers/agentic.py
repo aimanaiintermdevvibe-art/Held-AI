@@ -10,6 +10,8 @@ from fastapi import Depends
 
 from backend.ai_wrapper.client import GeminiClient, ProviderBusyError
 from backend.ai_wrapper.memory import (
+    asks_about_safety,
+    newest_concern_to_raise,
     RECENT_MESSAGES,
     build_context,
     build_user_memory,
@@ -362,12 +364,26 @@ async def _finish_turn(chat: _Chat, prompt: str, response: str, tracker: UsageTr
     session.update(
         total_message_count=saved["total_message_count"], title=saved["title"], updated_at=saved["updated_at"],
     )
+    if chat.is_new and chat.previous:
+        await _remember_check_in(session["id"], chat.previous, response)
     known = chat.history + saved["messages"]
     if summary_due(session, known):
         _enqueue(_summary_job(session["id"], known))
     if chat.is_new and chat.previous:
         _enqueue(_user_memory_job(session["user_id"], chat.previous))
     return usage
+
+
+async def _remember_check_in(session_id: str, previous: list[dict], response: str) -> None:
+    """When a new chat's first reply checks in about an earlier concern, store how far that
+    covers, so the user's later chats do not raise the same concern again (a new one still is)."""
+    until = newest_concern_to_raise(previous)
+    if not until or not asks_about_safety(response):
+        return
+    try:
+        await repository.mark_safety_check_in(session_id, until)
+    except Exception as exc:
+        logger.warning("Could not record the safety check-in for session %s: %s", session_id, exc)
 
 
 def _chunk_text(text: str, target_size: int = 24) -> list[str]:
