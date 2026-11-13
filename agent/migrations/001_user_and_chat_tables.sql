@@ -3,6 +3,7 @@
 -- against a database that already has these objects is a no-op; on a fresh
 -- database it creates everything the agent needs.
 
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'AuthProvider' AND typnamespace = 'public'::regnamespace) THEN
@@ -19,6 +20,8 @@ BEGIN
   END IF;
 END
 $$;
+
+
 
 -- 1. Users (identity source for the agent's bearer-token authentication)
 create table if not exists public."User" (
@@ -55,7 +58,7 @@ create table if not exists public.chat_sessions (
   user_id text null references public."User" (id) on delete set null,
   title text not null default 'New Conversation',
   status text not null default 'active',
-  metadata jsonb null default '{}'::jsonb,
+  metadata jsonb null default '{}'::jsonb, 
   created_at timestamp with time zone null default now(),
   updated_at timestamp with time zone null default now(),
   session_summary text null,
@@ -67,7 +70,7 @@ create table if not exists public.chat_sessions (
 create index if not exists idx_chat_sessions_user_id on public.chat_sessions using btree (user_id);
 create index if not exists idx_chat_sessions_created_at on public.chat_sessions using btree (created_at desc);
 
--- 3. Chat messages: full history the agent replays as context.
+-- 3. Chat messages: full history the agent replays as context. 
 create table if not exists public.chat_messages (
   id uuid not null default gen_random_uuid(),
   session_id uuid not null references public.chat_sessions (id) on delete cascade,
@@ -81,3 +84,5 @@ create table if not exists public.chat_messages (
 
 create index if not exists idx_chat_messages_session_id_created_at
   on public.chat_messages using btree (session_id, created_at);
+
+
