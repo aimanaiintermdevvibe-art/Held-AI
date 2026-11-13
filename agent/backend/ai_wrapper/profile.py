@@ -42,17 +42,3 @@ def user_context(profile: dict | None) -> dict | None:
     else:
         context["diagnosis"] = "none on record"
     return context
-
-
-def describe(context: dict | None) -> str:
-    """One-line, human-readable summary of a user_context (for the terminal client)."""
-    if not context:
-        return "Not set up yet"
-    if context["mode"].startswith("caregiver"):
-        who = f"Caregiver for your {context['cares_for']}" if context["cares_for"] in RELATION_NAMES.values() \
-            else f"Caregiver for {context['cares_for']}"
-        conditions = context.get("cared_for_person_diagnosed_conditions")
-    else:
-        who = "Myself"
-        conditions = context.get("user_diagnosed_conditions")
-    return f"{who} · " + (f"Diagnosed: {', '.join(conditions)}" if conditions else "No diagnosis")

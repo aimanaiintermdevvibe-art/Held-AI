@@ -6,11 +6,7 @@ from backend.db.repository import (
     delete_chat_session,
     get_session_messages,
     save_turn,
-    list_users,
-    get_user_by_id,
-    create_user_from_profile,
     ping_database,
-    get_database_overview,
 )
 
 __all__ = [
@@ -22,9 +18,5 @@ __all__ = [
     "delete_chat_session",
     "get_session_messages",
     "save_turn",
-    "list_users",
-    "get_user_by_id",
-    "create_user_from_profile",
     "ping_database",
-    "get_database_overview",
 ]

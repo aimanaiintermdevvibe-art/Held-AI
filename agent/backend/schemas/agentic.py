@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -12,6 +12,9 @@ class AgenticRunRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(default=None)
     session: Optional[Dict[str, Any]] = Field(default=None)
     session_data: Optional[Dict[str, Any]] = Field(default=None)
+    # True when prompt is a grief note the user wrote in the app and sent to the agent. A note always
+    # starts a new chat, and the chat and the note's message are marked isNote in their metadata.
+    isNote: bool = Field(default=False)
 
 
 class AgenticRunResponse(BaseModel):
@@ -19,5 +22,3 @@ class AgenticRunResponse(BaseModel):
     session_id: Optional[str] = None
     session: Optional[Dict[str, Any]] = None
     usage: Optional[Dict[str, Any]] = None  # this reply's token use (SHOW_TOKEN_USAGE)
-    # Passages from the user's uploaded documents that this reply was given (RAG).
-    sources: Optional[List[Dict[str, Any]]] = None

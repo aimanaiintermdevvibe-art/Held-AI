@@ -10,13 +10,12 @@ class ClinicalReasoningAgent(BaseAgent):
 
     async def run(
         self, *, message: str, memory: dict | None = None, user_context: dict | None = None,
-        documents: list[dict] | None = None,
     ) -> ClinicalAnalysis:
         """Clinical reading of a mental-health or caregiving concern."""
         return await self.client.generate_structured(
             model=self.model,
             system=SYSTEM_PROMPT + (MEMORY_NOTE if memory else ""),
-            user_input=with_memory(message, memory, user_context, documents),
+            user_input=with_memory(message, memory, user_context),
             response_model=ClinicalAnalysis,
             thinking_level=self.thinking_level,
             api_key=self.api_key,

@@ -425,15 +425,13 @@ def summary_due(session: dict, known: list[dict]) -> bool:
 
 
 def with_memory(
-    prompt: str, memory: dict | None, user_context: dict | None = None, documents: list[dict] | None = None,
+    prompt: str, memory: dict | None, user_context: dict | None = None,
 ) -> str:
-    """Agent input: the bare prompt, or the prompt with the user's profile context, excerpts
-    from their uploaded documents, and conversation memory."""
-    if not memory and not user_context and not documents:
+    """Agent input: the bare prompt, or the prompt with the user's profile context and
+    conversation memory."""
+    if not memory and not user_context:
         return prompt
     payload: dict = {"user_context": user_context} if user_context else {}
-    if documents:
-        payload["document_excerpts"] = documents
     if memory:
         payload["conversation_memory"] = memory
     payload["latest_prompt"] = prompt

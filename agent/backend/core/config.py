@@ -1,7 +1,5 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
-
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -36,35 +34,17 @@ class Settings(BaseSettings):
     # Testing aid: show each reply's token use in /run, /stream and the messages API. It is
     # stored with the reply either way.
     show_token_usage: bool = True
+    # Local testing only: serve Swagger at /docs (and the schema at /openapi.json). Keep it off in
+    # production, so the API's map is not public.
+    show_api_docs: bool = False
 
-    # Uploaded documents and retrieval (RAG). Vectors are 768-dimensional (migration 002).
-    embedding_model: str = "gemini-embedding-001"
-    rag_top_k: int = Field(default=5, ge=1, le=20)
-    # Measured with gemini-embedding-001: relevant passages score about 0.59-0.69,
-    # unrelated questions about 0.47-0.50 (see logs/rag_pgvector_setup_and_test.log).
-    rag_min_similarity: float = Field(default=0.55, ge=0.0, le=1.0)
-    document_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
-    document_max_chunks: int = Field(default=0, ge=0)  # 0 = no limit; long files are embedded in the background
-    embedding_batch_size: int = Field(default=100, ge=1, le=100)  # chunks per Gemini embedding request
-    # Run the background embedding worker in this instance. With several instances, enable it
-    # in one only; the others accept uploads and leave them queued for it.
-    ingestion_worker: bool = True
-    document_chunk_chars: int = Field(default=800, ge=200, le=6000)
-    document_chunk_overlap: int = Field(default=150, ge=0, le=1000)
-
-    # Held Backend API (the terminal client's accounts are in users/user<N>.json)
+    # Held Backend API (user profiles and grief notes)
     held_api_base_url: str = ""
 
-    # Database & JWT Settings
+    # The Held app's PostgreSQL database ("ChatSession", "ChatMessage", "User", "GriefNote")
     database_url: str = ""
-    database_pooler_url: str = ""
-    # Which tables DATABASE_URL holds. "agent": this project's own tables (chat_sessions,
-    # chat_messages, user_memory, ...), as on Supabase. "held": the Held app's development
-    # database, where chats go into its "ChatSession" / "ChatMessage" tables (backend/db/held_schema.py).
-    database_schema: Literal["agent", "held"] = "agent"
+    # Key that verifies Held access tokens locally; without it, tokens are confirmed with Held.
     jwt_secret: str = ""
-    # Testing only: requests need no token and all share one non-admin guest user.
-    auth_disabled: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(

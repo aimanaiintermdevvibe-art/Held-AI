@@ -23,6 +23,7 @@ from backend.ai_wrapper.memory import (
     with_recalled,
 )
 from backend.ai_wrapper.profile import user_context
+from backend.grief.note_tools import NoteTools, NotesShowCrisis
 from backend.core.config import Settings
 
 SAFE_RESPONSE = (
@@ -81,24 +82,40 @@ class AgenticPipeline:
 
     async def _respond(
         self, prompt: str, *, mode: str = "general_support", analysis=None, memory=None, context=None,
-        documents=None, notes=None,
+        notes=None, note_tools=None, is_note=False,
     ) -> str:
+        if mode == "crisis":
+            note_tools = None  # a crisis reply never goes looking through notes
         if mode == "off_topic":
             context = None  # a general question is answered without the user's care situation
         # The auditor only checks facts, so it gets the user's side of the memory.
         review_memory = audit_view(memory)
         feedback: list[str] = []
+        notes_checked = False
         for attempt in range(MAX_ATTEMPTS):
-            draft = (await self.empathy_agent.run(
-                message=prompt,
-                analysis=analysis,
-                mode=mode,
-                audit_feedback=feedback,
-                memory=memory,
-                user_context=context,
-                documents=documents,
-                notes=notes,
-            )).strip()
+            # Tools run once per message: a revision gets the results already found, as data.
+            found = note_tools.results if note_tools and note_tools.results else None
+            try:
+                draft = (await self.empathy_agent.run(
+                    message=prompt,
+                    analysis=analysis,
+                    mode=mode,
+                    audit_feedback=feedback,
+                    memory=memory,
+                    user_context=context,
+                    notes=found or notes,
+                    note_tools=None if found else note_tools,
+                    is_note=is_note,
+                )).strip()
+            except NotesShowCrisis:
+                # Crisis language in a retrieved note takes the same path as one in a message.
+                return await self._respond(prompt, mode="crisis", memory=memory, context=context,
+                                           notes=note_tools.results, is_note=is_note)
+            if note_tools and note_tools.results and not notes_checked:
+                notes_checked = True
+                if await self._notes_show_crisis(note_tools.results):
+                    return await self._respond(prompt, mode="crisis", memory=memory, context=context,
+                                               notes=note_tools.results, is_note=is_note)
 
             if not draft:
                 feedback = ["The previous attempt was empty. Write a complete, warm response."]
@@ -125,8 +142,8 @@ class AgenticPipeline:
                 continue
 
             audit = await self.audit_agent.run(
-                draft=draft, answer_mode=mode, memory=review_memory, user_context=context, documents=documents,
-                notes=notes,
+                draft=draft, answer_mode=mode, memory=review_memory, user_context=context,
+                notes=(note_tools.results if note_tools and note_tools.results else None) or notes,
             )
             if audit.compliant and audit.final_text.strip():
                 return _clean(audit.final_text)
@@ -134,6 +151,20 @@ class AgenticPipeline:
             feedback = audit.issues or ["Safety review failed. Revise into a safe response."]
 
         return self._fallback(mode)
+
+    async def _notes_show_crisis(self, results: list[dict]) -> bool:
+        """Whether retrieved notes hold crisis language, judged like a chat message: the instant
+        word check (already applied as each note came back), then the router."""
+        texts = [
+            n.get("text") or ""
+            for r in results
+            for n in (r["result"].get("notes") or ([r["result"]["note"]] if r["result"].get("note") else []))
+        ]
+        texts = [t for t in texts if t.strip()]
+        if not texts:
+            return False
+        decision = await self.intent_agent.run(message="\n\n".join(texts)[:6000])
+        return decision.category == "CRISIS"
 
     @staticmethod
     def _fallback(mode: str) -> str:
@@ -145,28 +176,32 @@ class AgenticPipeline:
 
     async def run(
         self, *, prompt: str, memory: dict | None = None, profile: dict | None = None,
-        documents: list[dict] | None = None,
         notes: list[dict] | None = None,
         recall: "Callable[[str], Awaitable[list[dict]]] | None" = None,
+        note_tools: "NoteTools | None" = None,
+        is_note: bool = False,
     ) -> str:
         """profile is the user's Held profile; its onboarding answers select one of the four
         user modes (myself/caregiver x diagnosed/undiagnosed) for reasoning, writing and review.
-        documents are passages retrieved from the user's uploaded documents (document_excerpts);
-        unlike the mode they are also used for off-topic questions.
 
         Each agent gets only the memory it needs: the router the user's messages and the last
         few turns of this chat, the reasoner a few more, the writer everything, and the auditor
         the user's side."""
         context = user_context(profile)
-        documents = documents or None
         notes = notes or None  # the user's grief notes, only when the message refers to them
-        reply = dict(memory=memory, context=context, documents=documents, notes=notes)
+        # note_tools: the read-only grief note tools, bound to the signed-in user; the writer decides
+        # whether to call them. They are not offered for a crisis reply.
+        reply = dict(memory=memory, context=context, notes=notes, note_tools=note_tools, is_note=is_note)
         if has_immediate_crisis_language(prompt):
             return await self._respond(prompt, mode="crisis", **reply)
 
         # Routing never sees other chats, so an old topic cannot turn a new message into a crisis.
         intent = await self.intent_agent.run(message=prompt, memory=routing_view(memory))
         mode = MODES[intent.category]
+        if is_note and mode != "crisis":
+            # A grief note sent from the app gets a grief companion's reply; it needs no lookups.
+            mode = "grief"
+            reply["note_tools"] = None
         # recall searches the user's earlier chats; only when the message refers back to one.
         if recall and (intent.refers_to_earlier_chats or mentions_earlier_chats(prompt)):
             memory = with_recalled(memory, await recall(intent.recall_query or prompt), prompt)
@@ -180,7 +215,6 @@ class AgenticPipeline:
         if mode == "clinical_support":
             analysis = await self.reasoning_agent.run(
                 message=prompt, memory=current_chat(memory, REASONING_MESSAGES), user_context=context,
-                documents=documents,
             )
             return await self._respond(prompt, mode=mode, analysis=analysis, **reply)
         return await self._respond(prompt, mode=mode, **reply)

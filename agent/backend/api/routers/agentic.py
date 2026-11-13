@@ -26,13 +26,12 @@ from backend.core.config import get_settings
 from backend.core.auth import AccessTokenPayload, fetch_user_profile, require_auth
 from backend.schemas.agentic import AgenticRunRequest, AgenticRunResponse
 from backend.db import repository
-from backend.grief.service import notes_for_chat
-# RAG disabled: DSM-5-TR knowledge now comes from the agent prompts.
-# from backend.rag.service import as_excerpts, as_sources, excerpts_for_chat
+from backend.grief.note_tools import NoteTools
+from backend.tools.user_profile import UserProfileTool, mode_fields
 
 logger = logging.getLogger("held_ai.agentic")
 
-# Generation requires a signed-in user that exists in public."User": every turn
+# Generation requires a signed-in user that exists in the Held "User" table: every turn
 # is stored in chat_sessions / chat_messages and remembered on later turns.
 router = APIRouter(prefix="/agentic")
 settings = get_settings()
@@ -159,19 +158,24 @@ class _Chat:
     memory: dict | None
     is_new: bool
     previous: list[dict] = field(default_factory=list)  # recaps of other chats, for a new chat only
+    profile: dict | None = None  # the user's mode fields, kept with the chat (read once per chat)
 
 
 async def _open_conversation(payload: AgenticRunRequest, principal: AccessTokenPayload) -> _Chat:
     """An existing chat: the session, its latest messages and the user memory, in one read.
     A new chat: the session is created, and recaps of the user's other recent chats are read."""
     req_session_id, _, meta_param = _extract_session_params(payload)
+    if payload.isNote:  # each grief note sent from the app starts its own chat
+        req_session_id = None
+        meta_param = {**(meta_param or {}), "isNote": True}
     owner_id = None if principal["role"] == "ADMIN" else principal["user_id"]
     if req_session_id:
         opened = await repository.open_chat(req_session_id, user_id=owner_id, recent=RECENT_MESSAGES)
         if not opened:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found.")
-        session, history, earlier = opened
-        return _Chat(session, history, build_context(history, session, earlier=earlier), is_new=False)
+        session, history, earlier, profile = opened
+        return _Chat(session, history, build_context(history, session, earlier=earlier), is_new=False,
+                     profile=profile)
 
     excerpt = payload.prompt[:40].strip() + ("..." if len(payload.prompt) > 40 else "")
     session = await repository.create_chat_session(
@@ -199,18 +203,12 @@ async def run_agentic(payload: AgenticRunRequest, request: Request) -> AgenticRu
     session = chat.session
     tracker = UsageTracker()
     try:
-        profile = await _profile(request, principal)
+        profile = await _chat_profile(chat, request, principal)
         async with asyncio.timeout(settings.agentic_run_timeout_seconds):
-            # RAG disabled:
-            # retrieved = await excerpts_for_chat(
-            #     gemini_client, settings, user_id=principal["user_id"], prompt=payload.prompt,
-            # )
-            notes = await notes_for_chat(principal["user_id"], request.state.access_token, payload.prompt)
             with track_usage(tracker):
                 response = await pipeline.run(
                     prompt=payload.prompt, memory=chat.memory, profile=profile,
-                    # documents=as_excerpts(retrieved),  # RAG disabled
-                    notes=notes, recall=_recall_for(chat),
+                    recall=_recall_for(chat), note_tools=NoteTools(principal["user_id"]), is_note=payload.isNote,
                 )
     except Exception as exc:
         log_usage("failed_turn", tracker, session=session["id"])
@@ -218,11 +216,10 @@ async def run_agentic(payload: AgenticRunRequest, request: Request) -> AgenticRu
         status_code, detail, headers = _failure(exc)
         raise HTTPException(status_code=status_code, detail=detail, headers=headers) from exc
 
-    usage = await _finish_turn(chat, payload.prompt, response, tracker)
+    usage = await _finish_turn(chat, payload.prompt, response, tracker, is_note=payload.isNote)
     return AgenticRunResponse(
         response=response, session_id=session["id"], session=session,
         usage=usage if settings.show_token_usage else None,
-        # sources=as_sources(retrieved) or None,  # RAG disabled
     )
 
 
@@ -238,20 +235,14 @@ async def stream_agentic(payload: AgenticRunRequest, request: Request) -> Stream
         yield _sse({"sessionId": session["id"], "session_id": session["id"], "session": session})
 
         try:
-            profile = await _profile(request, principal)
+            profile = await _chat_profile(chat, request, principal)
             async with asyncio.timeout(settings.agentic_run_timeout_seconds):
-                # RAG disabled:
-                # retrieved = await excerpts_for_chat(
-                #     gemini_client, settings, user_id=principal["user_id"], prompt=payload.prompt,
-                # )
-                notes = await notes_for_chat(principal["user_id"], request.state.access_token, payload.prompt)
                 # Keep the complete answer behind the existing safety audit before
                 # sending any user-visible text to the client.
                 with track_usage(tracker):
                     response = await pipeline.run(
                         prompt=payload.prompt, memory=chat.memory, profile=profile,
-                        # documents=as_excerpts(retrieved),  # RAG disabled
-                        notes=notes, recall=_recall_for(chat),
+                        recall=_recall_for(chat), note_tools=NoteTools(principal["user_id"]), is_note=payload.isNote,
                     )
         except Exception as exc:
             log_usage("failed_turn", tracker, session=session["id"])
@@ -272,13 +263,10 @@ async def stream_agentic(payload: AgenticRunRequest, request: Request) -> Stream
                 await asyncio.sleep(settings.agentic_stream_delay_seconds)
 
         # 2. Persist the turn and queue the background memory updates (non-blocking).
-        usage = await _finish_turn(chat, payload.prompt, response, tracker)
+        usage = await _finish_turn(chat, payload.prompt, response, tracker, is_note=payload.isNote)
         done: dict[str, object] = {"done": True, "sessionId": session["id"], "session_id": session["id"], "session": session}
         if settings.show_token_usage:
             done["usage"] = usage
-        # RAG disabled:
-        # if retrieved:
-        #     done["sources"] = as_sources(retrieved)
         yield _sse(done)
 
     return StreamingResponse(
@@ -288,12 +276,26 @@ async def stream_agentic(payload: AgenticRunRequest, request: Request) -> Stream
     )
 
 
-async def _profile(request: Request, principal: AccessTokenPayload) -> dict:
-    """The caller's Held profile; authentication may already have fetched it."""
-    profile = getattr(request.state, "held_profile", None)
-    if profile is not None:
-        return profile
-    return await fetch_user_profile(request.state.access_token, principal["user_id"])
+async def _chat_profile(chat: "_Chat", request: Request, principal: AccessTokenPayload) -> dict:
+    """The user's mode fields (role, relation, conditions) for this chat. Read once, through the
+    profile tool, when the chat starts (or the first time an older chat without one is used),
+    kept with the chat and reused by its later messages; a new chat reads it afresh. Held's
+    GET /auth/me (which authentication may already have called) is the fallback."""
+    if chat.profile is not None:
+        return chat.profile
+    profile = await UserProfileTool(principal["user_id"]).run()
+    if profile is None:  # the database could not give it
+        held = getattr(request.state, "held_profile", None)
+        if held is None:
+            held = await fetch_user_profile(request.state.access_token, principal["user_id"])
+        profile = mode_fields(held)
+    if profile:
+        try:
+            await repository.save_chat_profile(chat.session["id"], profile)
+        except Exception as exc:
+            logger.warning("Could not keep the profile with session %s: %s", chat.session["id"], exc)
+    chat.profile = profile or {}
+    return chat.profile
 
 
 async def _user_memory(user_id: str) -> str | None:
@@ -362,7 +364,9 @@ def _client_metadata(metadata: dict | None) -> dict | None:
     return {k: v for k, v in metadata.items() if k != "memory"} if metadata else metadata
 
 
-async def _finish_turn(chat: _Chat, prompt: str, response: str, tracker: UsageTracker) -> dict:
+async def _finish_turn(
+    chat: _Chat, prompt: str, response: str, tracker: UsageTracker, is_note: bool = False,
+) -> dict:
     """Save the turn in one write (with a new chat's AI-written title, and the reply's token use
     in its metadata), log the token use, then
     queue the memory updates that are due: the rolling summary every SUMMARY_THRESHOLD
@@ -381,6 +385,7 @@ async def _finish_turn(chat: _Chat, prompt: str, response: str, tracker: UsageTr
     try:
         saved = await repository.save_turn(
             session["id"], prompt, response, title=title, reply_metadata={"usage": usage},
+            prompt_metadata={"isNote": True} if is_note else None,
         )
     except Exception as exc:
         logger.error("Could not persist turn for session %s: %s", session["id"], exc)

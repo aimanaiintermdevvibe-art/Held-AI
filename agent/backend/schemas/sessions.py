@@ -1,13 +1,5 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class CreateSessionRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    title: Optional[str] = Field(default="New Conversation", max_length=200)
-    user_id: Optional[str] = Field(default=None, max_length=100)
-    metadata: Optional[Dict[str, Any]] = Field(default=None)
+from pydantic import BaseModel
 
 
 class ChatSessionResponse(BaseModel):

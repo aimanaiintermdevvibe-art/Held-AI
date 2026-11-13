@@ -34,8 +34,6 @@ CONFIRMED_TOKEN_TTL_SECONDS = 60.0
 _CONFIRMED_TOKENS_MAX = 1000
 _confirmed_tokens: Dict[str, tuple[float, str, Dict[str, Any]]] = {}  # token -> (expires, user_id, profile)
 
-# With AUTH_DISABLED=true every request is this one user.
-GUEST_PROFILE = {"id": "held-ai-guest", "email": "guest@held-ai.invalid", "fullName": "Test Guest", "role": "SELF"}
 
 
 def _remember_confirmed(token: str, user_id: str, profile: Dict[str, Any], token_expires_at: Any) -> None:
@@ -161,43 +159,10 @@ async def _authenticate(token: str) -> tuple[str, Dict[str, Any] | None]:
     return user_id, profile
 
 
-async def _authenticate_guest(request: Request) -> AccessTokenPayload:
-    """The shared guest user for AUTH_DISABLED, added to public."User" on first use.
-
-    The role is fixed rather than read from the row, so the guest can never reach admin routes.
-    """
-    try:
-        user = await repository.get_auth_user(GUEST_PROFILE["id"])
-        if not user:
-            user = await repository.create_user_from_profile(GUEST_PROFILE)
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The guest user is unavailable.",
-        ) from exc
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The guest user is unavailable.",
-        )
-
-    principal: AccessTokenPayload = {"user_id": user["id"], "role": "SELF"}
-    request.state.user = principal
-    request.state.access_token = ""
-    request.state.held_profile = {}  # no Held account, so replies are written without profile context
-    return principal
-
-
 async def require_auth(request: Request) -> AccessTokenPayload:
-    """FastAPI authentication dependency verifying Held bearer tokens.
-
-    A Held user missing from public."User" (for example, one who just registered) is
-    added from their Held profile, so the agent can store their conversations.
-    With AUTH_DISABLED, any token sent is ignored and the caller is the guest user.
+    """FastAPI authentication dependency verifying Held bearer tokens. The token's user must
+    exist in the Held database's "User" table (the Held app creates users; this service never does).
     """
-    if get_settings().auth_disabled:
-        return await _authenticate_guest(request)
-
     header = request.headers.get("authorization", "")
     if not header.startswith("Bearer "):
         raise HTTPException(
@@ -214,11 +179,6 @@ async def require_auth(request: Request) -> AccessTokenPayload:
 
     try:
         user = await repository.get_auth_user(user_id)
-        if not user:
-            if profile is None:
-                profile = await fetch_user_profile(token, user_id)
-            if profile.get("id") == user_id:
-                user = await repository.create_user_from_profile(profile)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

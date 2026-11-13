@@ -108,7 +108,7 @@ def chat(monkeypatch, fake_repo, auth):
 
     recalls: list = []
 
-    async def run(*, prompt, memory=None, profile=None, documents=None, notes=None, recall=None):
+    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
         seen.append(memory)
         recalls.append(recall)
         return f"Answer to: {prompt}"
@@ -176,12 +176,6 @@ def test_background_summary_writes_session_columns(chat, fake_repo, monkeypatch)
     session = fake_repo.sessions[sid]
     assert session["session_summary"] == "User's dog Max died."
     assert session["last_summarized_message_id"] == fake_repo.messages[sid][-1]["id"]
-
-
-def test_malformed_session_ids_are_not_found():
-    from backend.db import repository
-    assert repository._uuid("s1") is None
-    assert str(repository._uuid(" 6f1c0a52-8d7e-4a0e-9a57-0d7d3c1b2a10 ")) == "6f1c0a52-8d7e-4a0e-9a57-0d7d3c1b2a10"
 
 
 def user(text):

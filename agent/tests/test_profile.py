@@ -1,7 +1,7 @@
 import pytest
 
 from backend.ai_wrapper.memory import with_memory
-from backend.ai_wrapper.profile import describe, user_context
+from backend.ai_wrapper.profile import user_context
 
 DEPRESSION = {"id": "d1", "name": "Depression", "abbreviation": None}
 ADHD = {"id": "d2", "name": "Attention-Deficit/Hyperactivity Disorder", "abbreviation": "ADHD"}
@@ -54,14 +54,6 @@ def test_no_mode_before_onboarding(profile):
 def test_malformed_diseases_are_ignored():
     context = user_context({"role": "SELF", "diseases": [{"name": "  "}, "Depression", {"id": "x"}, DEPRESSION]})
     assert context["user_diagnosed_conditions"] == ["Depression"]
-
-
-def test_describe_summarises_the_mode():
-    assert describe(None) == "Not set up yet"
-    assert describe(user_context({"role": "SELF", "diseases": []})) == "Myself · No diagnosis"
-    assert describe(user_context({"role": "CAREGIVER", "relation": "PARENT", "diseases": [DEPRESSION]})) == (
-        "Caregiver for your parent · Diagnosed: Depression"
-    )
 
 
 def test_agent_input_carries_the_mode_with_or_without_memory():

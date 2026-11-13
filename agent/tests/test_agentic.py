@@ -14,8 +14,7 @@ from backend.ai_wrapper.orchestrator import (
     SAFE_RESPONSE,
     AgenticPipeline,
 )
-from backend.core.auth import GUEST_PROFILE
-from backend.core.config import Settings, get_settings
+from backend.core.config import Settings
 from backend.db import repository
 from backend.main import app
 
@@ -55,6 +54,10 @@ class FakeProvider:
                 final_text=json.loads(user_input)["draft"] + " [audited]", issues=[],
             )
         raise AssertionError(response_model)
+
+    async def generate_text_with_tools(self, *, tools, call_tool, **kwargs):
+        """Offered the grief note tools, this fake model never calls them."""
+        return await self.generate_text(**kwargs)
 
     async def generate_text(self, *, user_input, **kwargs):
         self.calls.append("synthesis")
@@ -115,11 +118,11 @@ def test_allowed_routes():
         "/agentic/sessions",
         "/agentic/sessions/{session_id}",
         "/agentic/sessions/{session_id}/messages",
-        "/agentic/users",
-        "/agentic/diseases",
-        "/agentic/admin/overview",
     }
     assert expected_paths.issubset(set(paths))
+    removed = {"/agentic/users", "/agentic/users/{user_id}", "/agentic/diseases", "/agentic/admin/overview",
+               "/agentic/grief-notes", "/agentic/grief-notes/moods", "/agentic/grief-notes/{note_date}"}
+    assert not removed & set(paths)  # the extra APIs are gone
     assert set(paths["/agentic/run"]) == {"post"}
     assert set(paths["/agentic/stream"]) == {"post"}
     assert set(paths["/agentic/sessions"]) == {"get"}
@@ -127,9 +130,11 @@ def test_allowed_routes():
 
 
 @pytest.mark.parametrize("path", [
-    "/health", "/docs", "/redoc", "/openapi.json", "/auth/me",
+    "/health", "/redoc", "/auth/me",
     "/agentic/capabilities", "/agentic/conversations", "/agentic/grief-calendar/entries",
-    "/agentic/documents", "/agentic/documents/any-id",  # RAG disabled
+    # the extra APIs (Swagger at /docs depends on SHOW_API_DOCS: see test_main_docs.py)
+    "/agentic/users", "/agentic/users/usr_1", "/agentic/diseases", "/agentic/admin/overview",
+    "/agentic/grief-notes", "/agentic/grief-notes/moods", "/agentic/grief-notes/2026-11-03",
 ])
 def test_removed_endpoints(api, path):
     client, _ = api
@@ -274,7 +279,6 @@ def test_generation_rejects_users_not_in_user_table(api, auth, path):
 
 @pytest.mark.parametrize("path", [
     "/agentic/sessions", "/agentic/sessions/private-session/messages",
-    "/agentic/users", "/agentic/admin/overview",
 ])
 def test_private_routes_still_require_auth(api, path):
     client, _ = api
@@ -295,74 +299,6 @@ def test_invalid_requests(api, payload):
     assert provider.calls == []
 
 
-@pytest.fixture
-def guest_api(monkeypatch, fake_repo):
-    """A client sending no token to a deployment running with AUTH_DISABLED."""
-    provider = FakeProvider()
-    monkeypatch.setattr(get_settings(), "auth_disabled", True)
-    monkeypatch.setattr(agentic, "pipeline", AgenticPipeline(provider, Settings(_env_file=None)))
-    monkeypatch.setattr(agentic, "generate_title", AsyncMock(return_value="Title"))
-    with TestClient(app) as client:
-        yield client, provider
-
-
-def test_tokens_are_required_unless_auth_is_explicitly_disabled():
-    assert Settings(_env_file=None).auth_disabled is False
-
-
-@pytest.mark.parametrize("path", ["/agentic/run", "/agentic/stream"])
-def test_disabled_auth_answers_without_a_token_as_the_guest(guest_api, fake_repo, profile_lookup, path):
-    client, provider = guest_api
-
-    result = client.post(path, json={"prompt": "I feel lonely."})
-
-    assert result.status_code == 200
-    assert "audited" in result.text
-    assert [s["user_id"] for s in fake_repo.sessions.values()] == [GUEST_PROFILE["id"]]
-    assert "user_context" not in provider.payloads[-1]
-    profile_lookup.assert_not_awaited()
-
-
-def test_disabled_auth_adds_the_guest_only_once(guest_api, fake_repo):
-    client, _ = guest_api
-    assert client.post("/agentic/run", json={"prompt": "Hello"}).status_code == 200
-    assert client.post("/agentic/run", json={"prompt": "Hello again"}).status_code == 200
-    assert fake_repo.created_from_profiles == [GUEST_PROFILE]
-
-
-@pytest.mark.parametrize("authorization", ["Bearer invalid-token", "Bearer ", "Basic invalid-token"])
-def test_disabled_auth_ignores_any_token_sent(guest_api, authorization):
-    client, _ = guest_api
-    assert client.get("/agentic/sessions", headers={"Authorization": authorization}).status_code == 200
-
-
-@pytest.mark.parametrize("path", ["/agentic/users", "/agentic/users/usr_1", "/agentic/admin/overview"])
-@pytest.mark.parametrize("guest_role", ["USER", "ADMIN"])
-def test_disabled_auth_keeps_admin_routes_closed(guest_api, fake_repo, path, guest_role):
-    client, _ = guest_api
-    fake_repo.users[GUEST_PROFILE["id"]] = guest_role
-    assert client.get(path).status_code == 403
-
-
-def test_disabled_auth_hides_other_users_sessions(guest_api, fake_repo):
-    client, _ = guest_api
-    private = asyncio.run(fake_repo.create_chat_session(user_id="usr_1", title="Private"))["id"]
-
-    assert client.get("/agentic/sessions").json() == []
-    assert client.get(f"/agentic/sessions/{private}/messages").status_code == 404
-    assert client.post("/agentic/run", json={"prompt": "Hi", "session_id": private}).status_code == 404
-    assert client.delete(f"/agentic/sessions/{private}").status_code == 404
-    assert private in fake_repo.sessions
-
-
-def test_disabled_auth_reports_an_unavailable_database(guest_api, monkeypatch):
-    client, _ = guest_api
-    monkeypatch.setattr(repository, "get_auth_user", AsyncMock(side_effect=RuntimeError("Database is unavailable.")))
-    result = client.post("/agentic/run", json={"prompt": "Hi"})
-    assert result.status_code == 503
-    assert result.json() == {"detail": "The guest user is unavailable."}
-
-
 def test_a_repeated_safety_question_is_rewritten_once(api):
     client, provider = api
     provider.drafts = ["Are you safe right now?", "Work sounds exhausting."]
@@ -374,14 +310,6 @@ def test_a_repeated_safety_question_is_rewritten_once(api):
 
     assert result.json()["response"] == "Work sounds exhausting. [audited]"
     assert "already asked about the user's safety" in provider.payloads[-1]["revision_feedback"][0]
-
-
-def test_chat_replies_have_no_document_sources(api):
-    client, provider = api
-    result = client.post("/agentic/run", json={"prompt": "I feel anxious."})
-    assert result.status_code == 200
-    assert "sources" not in result.json()
-    assert "document_excerpts" not in provider.payloads[-1]
 
 
 def test_agents_use_dsm_knowledge_for_laypeople_and_never_apply_it_to_the_user():
@@ -776,7 +704,7 @@ def test_only_the_first_new_chat_after_a_concern_checks_in(fake_repo, auth, monk
     """A check-in about an earlier concern is stored, and later new chats no longer get it."""
     seen = []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None):
+    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
         recaps = (memory or {}).get("previous_conversations") or []
         concerns = [c for r in recaps for c in r.get("safety_concerns", [])]
         seen.append(concerns)

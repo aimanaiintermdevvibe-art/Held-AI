@@ -9,7 +9,7 @@ from backend.main import app
 
 @pytest.fixture
 def client(monkeypatch, fake_repo, auth):
-    async def run(*, prompt, memory=None, profile=None, documents=None, notes=None, recall=None):
+    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
         return f"Answer to: {prompt}"
 
     async def title(*args):
@@ -97,16 +97,3 @@ def test_delete_session_endpoint(client, auth, fake_repo):
     res = client.delete(f"/agentic/sessions/{sid}")
     assert res.status_code == 200 and res.json() == {"success": True}
     assert sid not in fake_repo.sessions
-
-
-def test_users_endpoints_are_admin_only_and_read_only(client, auth):
-    assert client.get("/agentic/users").status_code == 403
-    admin = auth("adm_1")
-    assert len(client.get("/agentic/users", headers=admin).json()) == 3
-    assert client.get("/agentic/users/usr_1", headers=admin).json()["role"] == "USER"
-    assert client.post("/agentic/users", json={"email": "b@example.com"}, headers=admin).status_code == 405
-
-
-def test_diseases_are_read_only_and_need_the_database(client):
-    assert client.get("/agentic/diseases").status_code == 503  # tests run without a database
-    assert client.post("/agentic/diseases", json={"name": "New"}).status_code == 405

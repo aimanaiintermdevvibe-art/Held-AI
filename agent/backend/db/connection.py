@@ -22,12 +22,7 @@ async def get_db_pool() -> Optional[asyncpg.Pool]:
             return _pool
 
         settings = get_settings()
-        candidates = [
-            settings.database_url,
-            os.environ.get("DATABASE_URL", ""),
-            settings.database_pooler_url,
-            os.environ.get("DATABASE_POOLER_URL", ""),
-        ]
+        candidates = [settings.database_url, os.environ.get("DATABASE_URL", "")]
 
         # Filter out empty or duplicate candidates
         urls = []
@@ -37,8 +32,7 @@ async def get_db_pool() -> Optional[asyncpg.Pool]:
 
         for url in urls:
             try:
-                # This service connects to both TLS-only hosted databases and
-                # the Held LAN PostgreSQL server, which does not support TLS.
+                # TLS when the server offers it; the Held LAN server does not.
                 pool = await asyncpg.create_pool(
                     dsn=url,
                     ssl="prefer",

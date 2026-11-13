@@ -13,15 +13,9 @@ TEST_SECRET = "test-secret"
 
 @pytest.fixture(autouse=True)
 def no_real_database(monkeypatch):
-    """Keep tests off the configured databases (Supabase or the Held development database);
-    tests use FakeRepo instead, and the default "agent" table layout whatever .env says."""
-    monkeypatch.setattr(get_settings(), "database_schema", "agent")
+    """Keep tests off the configured database; tests use FakeRepo instead."""
     monkeypatch.setattr("backend.db.repository.get_db_pool", AsyncMock(return_value=None))
-    monkeypatch.setattr("backend.db.held_schema.get_db_pool", AsyncMock(return_value=None))
-    monkeypatch.setattr("backend.db.documents.get_db_pool", AsyncMock(return_value=None))
-    # Chat tests run without uploaded documents or grief notes unless a test provides some.
-    # monkeypatch.setattr("backend.api.routers.agentic.excerpts_for_chat", AsyncMock(return_value=[]))  # RAG disabled
-    monkeypatch.setattr("backend.api.routers.agentic.notes_for_chat", AsyncMock(return_value=[]))
+    # Chat tests run without grief notes unless a test provides some.
     monkeypatch.setattr("backend.db.grief_notes.get_db_pool", AsyncMock(return_value=None))
 
 
@@ -34,32 +28,15 @@ def no_real_gemini(monkeypatch):
 
     monkeypatch.setattr(agentic.gemini_client, "generate_text", AsyncMock(side_effect=RuntimeError("no Gemini in tests")))
     monkeypatch.setattr(agentic.gemini_client, "generate_structured", AsyncMock(side_effect=RuntimeError("no Gemini in tests")))
-
-
-@pytest.fixture(autouse=True, scope="session")
-def no_real_ingestion_log():
-    """Keep test runs out of logs/document_ingestion.log."""
-    import logging
-
-    from backend.rag.ingestion import logger
-
-    file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
-    for handler in file_handlers:
-        logger.removeHandler(handler)
-    yield
-    for handler in file_handlers:
-        logger.addHandler(handler)
+    monkeypatch.setattr(agentic.gemini_client, "generate_text_with_tools", AsyncMock(side_effect=RuntimeError("no Gemini in tests")))
 
 
 @pytest.fixture(autouse=True)
-def no_real_held_api(monkeypatch, tmp_path):
-    """Keep tests off the Held API and the project's real users/ account files."""
+def no_real_held_api(monkeypatch):
+    """Keep tests off the Held API."""
     monkeypatch.setattr("backend.api.routers.agentic.fetch_user_profile", AsyncMock(return_value={}))
     monkeypatch.setattr("backend.core.auth.held_me", AsyncMock(return_value=None))  # Held rejects
     monkeypatch.setattr("backend.core.auth._confirmed_tokens", {})  # no confirmations carried between tests
-    users_dir = tmp_path / "users"
-    users_dir.mkdir()
-    monkeypatch.setattr("backend.core.user_accounts.USERS_DIR", users_dir)
 
 
 class FakeRepo:
@@ -70,8 +47,9 @@ class FakeRepo:
         self.sessions: dict[str, dict] = {}
         self.messages: dict[str, list[dict]] = {}
         self.user_memory: dict[str, str] = {}
-        self.check_ins: dict[str, str] = {}  # session id -> newest concern its check-in covered
-        self.created_from_profiles: list[dict] = []
+        self.check_ins: dict[str, str] = {}
+        self.chat_profiles: dict[str, dict] = {}  # session id -> profile kept with the chat  # session id -> newest concern its check-in covered
+        self.profiles: dict[str, dict] = {}  # onboarding answers by user id; none means "use Held's API"
         self.ops: list[str] = []  # chat-related database calls, in order
 
     @staticmethod
@@ -81,11 +59,6 @@ class FakeRepo:
     async def get_auth_user(self, user_id):
         role = self.users.get(user_id)
         return {"id": user_id, "role": role} if role else None
-
-    async def create_user_from_profile(self, profile):
-        self.created_from_profiles.append(profile)
-        self.users.setdefault(profile["id"], "CAREGIVER" if profile.get("role") == "CAREGIVER" else "USER")
-        return await self.get_auth_user(profile["id"])
 
     async def create_chat_session(self, user_id=None, title="New Conversation", metadata=None):
         self.ops.append("create_chat_session")
@@ -125,7 +98,11 @@ class FakeRepo:
         if not session:
             return None
         latest = [self._brief(m) for m in self.messages[session_id][-recent:]]
-        return session, latest, self.user_memory.get(session["user_id"])
+        return session, latest, self.user_memory.get(session["user_id"]), self.chat_profiles.get(session_id)
+
+    async def save_chat_profile(self, session_id, profile):
+        self.ops.append("save_chat_profile")
+        self.chat_profiles[session_id] = dict(profile)
 
     async def get_messages_after(self, session_id, anchor_id, limit=200):
         self.ops.append("get_messages_after")
@@ -134,7 +111,7 @@ class FakeRepo:
         start = ids.index(anchor_id) + 1 if anchor_id in ids else 0
         return [self._brief(m) for m in stored[start:start + limit]]
 
-    async def save_turn(self, session_id, prompt, response, title=None, reply_metadata=None):
+    async def save_turn(self, session_id, prompt, response, title=None, reply_metadata=None, prompt_metadata=None):
         self.ops.append("save_turn")
         session = self.sessions.get(session_id)
         if not session:
@@ -142,7 +119,7 @@ class FakeRepo:
         saved = [
             {"id": str(uuid4()), "session_id": session_id, "role": role, "content": content,
              "metadata": metadata, "created_at": self._now()}
-            for role, content, metadata in (("user", prompt, {}), ("assistant", response, dict(reply_metadata or {})))
+            for role, content, metadata in (("user", prompt, dict(prompt_metadata or {})), ("assistant", response, dict(reply_metadata or {})))
         ]
         self.messages[session_id].extend(saved)
         session["total_message_count"] += 2
@@ -233,17 +210,12 @@ class FakeRepo:
     async def ping_database(self):
         return True
 
-    async def get_database_overview(self):
-        return {"connected": True, "counts": {
-            "users_count": len(self.users), "sessions_count": len(self.sessions),
-            "messages_count": sum(len(m) for m in self.messages.values()),
-        }}
+    async def get_user_profile(self, user_id):
+        profile = self.profiles.get(user_id)
+        if isinstance(profile, Exception):
+            raise profile
+        return dict(profile) if profile else None
 
-    async def list_users(self, limit=50):
-        return [{"id": uid, "role": role} for uid, role in self.users.items()][:limit]
-
-    async def get_user_by_id(self, user_id):
-        return {"id": user_id, "role": self.users[user_id]} if user_id in self.users else None
 
 
 @pytest.fixture
@@ -252,9 +224,8 @@ def fake_repo(monkeypatch):
     for name in (
         "get_auth_user", "create_chat_session", "get_chat_session", "get_session_messages",
         "open_chat", "get_messages_after", "save_turn", "save_session_summary", "save_user_memory",
-        "get_previous_conversations", "mark_safety_check_in", "get_user_memory", "search_past_conversations",
-        "list_chat_sessions", "delete_chat_session", "ping_database", "get_database_overview",
-        "list_users", "get_user_by_id", "create_user_from_profile",
+        "get_previous_conversations", "mark_safety_check_in", "get_user_memory", "search_past_conversations", "save_chat_profile",
+        "list_chat_sessions", "delete_chat_session", "ping_database", "get_user_profile",
     ):
         monkeypatch.setattr(repository, name, getattr(repo, name))
     return repo

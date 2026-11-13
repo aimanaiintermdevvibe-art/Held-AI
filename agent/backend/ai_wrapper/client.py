@@ -2,7 +2,7 @@ import asyncio
 import logging
 import random
 import re
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 from time import perf_counter
 
 from pydantic import BaseModel
@@ -132,6 +132,9 @@ class GeminiClient:
         api_key: str | None,
         response_model: type[BaseModel] | None = None,
         parse: Callable[[Any], ParsedT],
+        contents: Any = None,
+        tools: Any = None,
+        tool_mode: str | None = None,
     ) -> ParsedT:
         """One generate_content call, tried again on a transient failure, with each attempt's
         token use recorded. A rate limit is tried again only with a different key. parse turns
@@ -149,12 +152,14 @@ class GeminiClient:
                 client = self._get_client(key)
                 response = await client.aio.models.generate_content(
                     model=model,
-                    contents=user_input,
+                    contents=user_input if contents is None else contents,
                     config=self._config(
                         system=system,
                         thinking_level=level,
                         response_model=response_model,
                         max_output_tokens=self.settings.gemini_max_output_tokens,
+                        tools=tools,
+                        tool_mode=tool_mode,
                     ),
                 )
             except RuntimeError:
@@ -194,6 +199,8 @@ class GeminiClient:
         thinking_level: str,
         response_model: type[BaseModel] | None = None,
         max_output_tokens: int | None = None,
+        tools: Any = None,
+        tool_mode: str | None = None,
     ) -> Any:
         from google.genai import types
 
@@ -206,6 +213,13 @@ class GeminiClient:
         if max_output_tokens:
             # Thinking counts toward this limit too; it only stops a runaway reply.
             values["max_output_tokens"] = max_output_tokens
+        if tools:
+            # Our code runs every call; the SDK never calls anything by itself.
+            values["tools"] = tools
+            values["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+            values["tool_config"] = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode=tool_mode or "AUTO"),
+            )
         if response_model is not None:
             # The SDK's response_schema dialect rejects additionalProperties.
             # Keep strict extra-field validation in Pydantic after generation.
@@ -282,36 +296,58 @@ class GeminiClient:
             parse=parse,
         )
 
-    EMBED_BATCH_SIZE = 100  # Gemini's limit for texts in one embedding request
-
-    async def embed(
+    async def generate_text_with_tools(
         self,
-        texts: list[str],
         *,
         model: str,
-        task_type: str,
-        dimensions: int,
-    ) -> list[list[float]]:
-        """One embedding per text, in order. task_type is RETRIEVAL_DOCUMENT for stored
-        chunks and RETRIEVAL_QUERY for search queries."""
+        system: str,
+        user_input: str,
+        tools: list[dict[str, Any]],
+        call_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
+        thinking_level: str,
+        api_key: str | None = None,
+        max_rounds: int = 4,
+    ) -> str:
+        """A reply written while the model may call tools (mode AUTO: the model decides). Our
+        code runs each call through call_tool and sends the result back as a function response.
+        The model's response is appended to the history exactly as returned, which keeps the
+        thought signatures Gemini 3 requires during function calling. After max_rounds of calls
+        the model must answer without tools. call_tool may raise to end the exchange."""
         from google.genai import types
 
-        client = self._get_client()
-        config = types.EmbedContentConfig(task_type=task_type, output_dimensionality=dimensions)
-        vectors: list[list[float]] = []
-        for start in range(0, len(texts), self.EMBED_BATCH_SIZE):
-            batch = texts[start:start + self.EMBED_BATCH_SIZE]
-            try:
-                response = await client.aio.models.embed_content(model=model, contents=batch, config=config)
-            except RuntimeError:
-                raise
-            except Exception as exc:
-                raise _provider_failure("Gemini embedding request failed", exc) from exc
-            values = [list(e.values or []) for e in response.embeddings or []]
-            if len(values) != len(batch) or any(len(v) != dimensions for v in values):
-                raise RuntimeError("Gemini returned an unexpected number or size of embeddings")
-            vectors.extend(values)
-        return vectors
+        declared = [types.Tool(function_declarations=[types.FunctionDeclaration.model_validate(t) for t in tools])]
+        contents: list[Any] = [types.Content(role="user", parts=[types.Part(text=user_input)])]
+
+        def parse(response: Any) -> Any:
+            if response.function_calls:
+                return response
+            if not (response.text or "").strip():
+                raise _NoOutput("Gemini returned an empty response")
+            return response
+
+        for round_number in range(max_rounds + 1):
+            response = await self._generate(
+                label="Gemini text response",
+                model=model,
+                system=system,
+                user_input=user_input,
+                thinking_level=thinking_level,
+                api_key=api_key,
+                parse=parse,
+                contents=contents,
+                tools=declared,
+                tool_mode="AUTO" if round_number < max_rounds else "NONE",
+            )
+            calls = response.function_calls or []
+            if not calls:
+                return response.text.strip()
+            contents.append(response.candidates[0].content)
+            replies = [
+                types.Part.from_function_response(name=call.name, response=await call_tool(call.name, dict(call.args or {})))
+                for call in calls
+            ]
+            contents.append(types.Content(role="user", parts=replies))
+        raise RuntimeError("Gemini kept calling tools after they were switched off")
 
     async def close(self) -> None:
         for client in self._clients.values():

@@ -2,39 +2,47 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-# RAG disabled: documents, the router behind every upload and search endpoint.
-# from backend.api.routers import agentic, documents, grief_notes, sessions
-from backend.api.routers import agentic, grief_notes, sessions
-from backend.core.auth import logger as auth_logger
+from backend.api.routers import agentic, sessions
 from backend.core.config import get_settings
 from backend.db.connection import close_db_pool
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    if get_settings().auth_disabled:
-        auth_logger.warning("AUTH_DISABLED is on: requests need no token and share one guest user.")
-    # RAG disabled: documents whose embedding was interrupted continue in the background.
-    # await documents.ingestion_worker.resume_unfinished()
     try:
         yield
     finally:
-        # await documents.ingestion_worker.stop()  # RAG disabled
         await agentic.gemini_client.close()
         await close_db_pool()
 
 
-app = FastAPI(
-    title=get_settings().app_name,
-    lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
-)
+def docs_urls(show: bool) -> dict:
+    """Swagger at /docs only when SHOW_API_DOCS is on (local testing); otherwise no docs at all."""
+    return {"docs_url": "/docs" if show else None, "redoc_url": None,
+            "openapi_url": "/openapi.json" if show else None}
+
+
+app = FastAPI(title=get_settings().app_name, lifespan=lifespan, **docs_urls(get_settings().show_api_docs))
 app.include_router(agentic.router)
 app.include_router(sessions.router)
-# app.include_router(documents.router)  # RAG disabled
-app.include_router(grief_notes.router)
+
+
+def _openapi_with_bearer() -> dict:
+    """The schema with a Bearer token field, so Swagger's Authorize button can send a Held token."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "HeldToken": {"type": "http", "scheme": "bearer", "description": "A Held access token"},
+    }
+    schema["security"] = [{"HeldToken": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _openapi_with_bearer
 
 
 @app.get("/", tags=["Health"], summary="Public liveness check")
