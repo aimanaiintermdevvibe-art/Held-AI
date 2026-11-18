@@ -10,6 +10,8 @@ Held AI is the chat backend for the Held app. It gives mental-health, caregiving
 4. Agent 3 writes the reply in plain, human language and avoids stock phrases.
 5. Agent 4 reviews it for safety.
 
+Held only talks about mental health, wellbeing, caregiving and grief. A message on any other subject (space, sport, coding, math, recipes, general knowledge and so on) gets a short, fixed reply saying so, and no answer is written. Feelings about any subject, such as stress about an exam, are still supported.
+
 The turn is saved in one database write.
 
 **Memory:**
@@ -45,7 +47,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-All 378 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
+All 386 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
 
 **4. Run.**
 

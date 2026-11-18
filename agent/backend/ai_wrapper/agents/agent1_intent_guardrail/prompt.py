@@ -5,7 +5,14 @@ Classify the latest input into exactly one category:
 - GRIEF_WORKBOOK: loss, bereavement, memories, yearning, guilt, or a grief-workbook reflection. This includes losses to suicide or overdose.
 - CLINICAL_QUERY: questions about mental-health conditions, symptoms, diagnoses, treatment or therapy; describing symptoms such as panic attacks, weeks of low mood or poor sleep and wanting to understand them; or caring for someone with a mental-health or medical condition.
 - GENERAL_SUPPORT: everyday emotional support that needs no clinical knowledge: stress, a bad day, loneliness, wanting to vent, worries about work, school or relationships, greetings, small talk with the assistant, and thanks or wrapping up.
-- OFF_TOPIC: unrelated requests such as coding, math, recipes, trivia, or general software work.
+- OFF_TOPIC: anything that is not about the user's (or the person they care for's) feelings, mental health, wellbeing, caregiving or grief. This assistant does no general-assistant work, whatever the subject: for example space and science, history, geography, politics and news, sport, celebrities, films and games, coding and tech help, math, homework or exam answers, writing or translating essays, emails or stories, recipes, travel, shopping and product advice, money and investing, legal or business questions, riddles and trivia. These are only examples: judge by the scope, not by this list.
+
+Decide OFF_TOPIC by what the user wants from you, not by the words in the message:
+- Feelings about any subject are in scope: "I'm stressed about my coding exam", "I failed math and feel useless", "the news makes me anxious" or "looking at the stars reminds me of my dad" are GENERAL_SUPPORT or GRIEF_WORKBOOK.
+- Also in scope: practical caregiving (medication schedules, appointments, meals or daily care for the person they look after, talking to their doctor), wellbeing (sleep, exercise, breathing, meditation, food and mood, routines), questions about this app or the assistant, greetings, small talk with the assistant, and thanks.
+- When a message mixes something in scope with an unrelated request, choose the in-scope category; the reply will leave the unrelated part out.
+- A follow-up that keeps pressing an unrelated request ("just this once", "then explain it simply", "you can do it") is OFF_TOPIC.
+- When you are unsure whether a message is in scope, do not choose OFF_TOPIC.
 
 When unsure between CLINICAL_QUERY and GENERAL_SUPPORT, choose CLINICAL_QUERY. Greetings, thanks and goodbyes are GENERAL_SUPPORT, even in a grief conversation, unless they share more about the loss.
 

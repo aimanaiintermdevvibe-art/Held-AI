@@ -30,9 +30,17 @@ SAFE_RESPONSE = (
     "I'm sorry, I wasn't able to put together a good reply just now. "
     "I'm still here to help — would you try sending that again or telling me more?"
 )
-OFF_TOPIC_FALLBACK_RESPONSE = (
-    "I'm sorry, I couldn't put together a good answer to that just now. "
-    "Could you try asking again in a slightly different way?"
+# Held supports mental health, caregiving and grief only. Anything else (space, sport, coding,
+# recipes, general knowledge...) gets one of these, from code: no reply is written for it, so an
+# answer cannot slip through. They take turns within a chat so a repeated ask is not met with
+# the same words.
+OFF_TOPIC_REPLIES = (
+    "That's outside what I can help with. I'm here for mental health, caregiving and grief "
+    "support, so if something is on your mind, we can talk about it.",
+    "I can't help with that one, as I only support mental health, caregiving and grief. "
+    "**Is there something you're going through that you'd like to talk about?**",
+    "That's not something I can help with here. My focus is mental health, caregiving and "
+    "grief, and if you'd like to talk about how you're doing, I'm listening.",
 )
 CRISIS_FALLBACK_RESPONSE = (
     "I'm really glad you reached out, and I'm staying right here with you. "
@@ -65,6 +73,17 @@ def _clean(text: str) -> str:
     return text.translate(_ODD_SPACES).strip()
 
 
+def off_topic_reply(memory: dict | None) -> str:
+    """The next out-of-scope reply for this chat: the one after the last used, so a user who
+    asks again does not get the same words."""
+    recent = (memory or {}).get("recent_messages") or []
+    used = [m.get("content", "").strip() for m in recent if m.get("role") == "assistant"]
+    used = [text for text in used if text in OFF_TOPIC_REPLIES]
+    if not used:
+        return OFF_TOPIC_REPLIES[0]
+    return OFF_TOPIC_REPLIES[(OFF_TOPIC_REPLIES.index(used[-1]) + 1) % len(OFF_TOPIC_REPLIES)]
+
+
 class AgenticPipeline:
     def __init__(self, client: GeminiClient, settings: Settings) -> None:
         self.intent_agent = IntentGuardrailAgent(
@@ -86,8 +105,6 @@ class AgenticPipeline:
     ) -> str:
         if mode == "crisis":
             note_tools = None  # a crisis reply never goes looking through notes
-        if mode == "off_topic":
-            context = None  # a general question is answered without the user's care situation
         # The auditor only checks facts, so it gets the user's side of the memory.
         review_memory = audit_view(memory)
         feedback: list[str] = []
@@ -170,8 +187,6 @@ class AgenticPipeline:
     def _fallback(mode: str) -> str:
         if mode == "crisis":
             return CRISIS_FALLBACK_RESPONSE
-        if mode == "off_topic":
-            return OFF_TOPIC_FALLBACK_RESPONSE
         return SAFE_RESPONSE
 
     async def run(
@@ -202,6 +217,10 @@ class AgenticPipeline:
             # A grief note sent from the app gets a grief companion's reply; it needs no lookups.
             mode = "grief"
             reply["note_tools"] = None
+        if mode == "off_topic":
+            # Outside mental health, caregiving and grief: declined without writing an answer.
+            # The instant crisis check above has already run on the message.
+            return off_topic_reply(memory)
         # recall searches the user's earlier chats; only when the message refers back to one.
         if recall and (intent.refers_to_earlier_chats or mentions_earlier_chats(prompt)):
             memory = with_recalled(memory, await recall(intent.recall_query or prompt), prompt)

@@ -10,7 +10,7 @@ from backend.api.routers import agentic
 from backend.ai_wrapper.contracts import AuditDecision, ClinicalAnalysis, GriefAnalysis, IntentDecision
 from backend.ai_wrapper.orchestrator import (
     CRISIS_FALLBACK_RESPONSE,
-    OFF_TOPIC_FALLBACK_RESPONSE,
+    OFF_TOPIC_REPLIES,
     SAFE_RESPONSE,
     AgenticPipeline,
 )
@@ -70,8 +70,6 @@ class FakeProvider:
             return self.drafts.pop(0)
         if payload["mode"] == "crisis":
             return "I'm right here with you. What is happening right now?"
-        if payload["mode"] == "off_topic":
-            return "Model answer for: " + payload["message"]
         return "Support for: " + payload["message"]
 
 
@@ -238,11 +236,63 @@ def test_user_mode_reaches_reasoning_writing_and_review(api):
     assert "user_context" not in intent_input
 
 
-def test_off_topic_answers_ignore_the_user_mode(api):
+@pytest.mark.parametrize("prompt", [
+    "How do I sort a list in Python?", "What is 17 x 23?", "How far is Mars from the Sun?",
+    "Who won the last World Cup?", "Give me a recipe for biryani.",
+])
+def test_out_of_scope_questions_are_declined_without_an_answer(api, prompt):
     client, provider = api
     provider.intent = "OFF_TOPIC"
-    assert client.post("/agentic/run", json={"prompt": "How do I sort a list in Python?"}).status_code == 200
-    assert "user_context" not in provider.payloads[-1]
+    result = client.post("/agentic/run", json={"prompt": prompt})
+    assert result.status_code == 200
+    assert result.json()["response"] == OFF_TOPIC_REPLIES[0]
+    assert provider.calls == [IntentDecision]  # only the router: nothing writes or reviews an answer
+    assert provider.payloads == []
+
+
+def test_the_decline_does_not_name_a_subject():
+    for text in OFF_TOPIC_REPLIES:
+        assert "mental health, caregiving" in text
+        for subject in ("coding", "code", "math", "space", "recipe"):
+            assert subject not in text.lower()
+
+
+def test_repeated_out_of_scope_asks_get_different_words(api, fake_repo):
+    client, provider = api
+    provider.intent = "OFF_TOPIC"
+    sid = client.post("/agentic/run", json={"prompt": "Tell me about black holes."}).json()["session_id"]
+    replies = [OFF_TOPIC_REPLIES[0]]
+    for prompt in ("Please, just this once.", "Come on, you can do it.", "Explain it simply then."):
+        replies.append(client.post("/agentic/run", json={"prompt": prompt, "session_id": sid}).json()["response"])
+    assert replies == [OFF_TOPIC_REPLIES[0], OFF_TOPIC_REPLIES[1], OFF_TOPIC_REPLIES[2], OFF_TOPIC_REPLIES[0]]
+    saved = [m["content"] for m in fake_repo.messages[sid] if m["role"] == "assistant"]
+    assert saved == replies  # the declines are saved like any reply
+
+
+def test_out_of_scope_is_declined_on_the_stream_too(api):
+    client, provider = api
+    provider.intent = "OFF_TOPIC"
+    stream = client.post("/agentic/stream", json={"prompt": "What is the capital of France?"}).text
+    chunks = [json.loads(line[6:])["text"] for line in stream.splitlines() if line.startswith('data: {"text":')]
+    assert "".join(chunks) == OFF_TOPIC_REPLIES[0]
+    assert '"done": true' in stream
+
+
+def test_an_in_scope_message_after_a_decline_gets_a_normal_reply(api):
+    client, provider = api
+    provider.intent = "OFF_TOPIC"
+    sid = client.post("/agentic/run", json={"prompt": "Solve 2x + 3 = 11."}).json()["session_id"]
+    provider.intent = "GENERAL_SUPPORT"
+    reply = client.post("/agentic/run", json={"prompt": "Honestly I'm just stressed about my exam.", "session_id": sid})
+    assert reply.json()["response"] == "Support for: Honestly I'm just stressed about my exam. [audited]"
+
+
+def test_a_grief_note_is_never_declined(api):
+    client, provider = api
+    provider.intent = "OFF_TOPIC"  # the router misreads a note about stargazing with dad
+    result = client.post("/agentic/run", json={"prompt": "Dad and I used to watch the stars.", "isNote": True})
+    assert result.json()["response"] not in OFF_TOPIC_REPLIES
+    assert provider.payloads[-1]["mode"] == "grief"
 
 
 def test_missing_profile_sends_no_user_mode(api, profile_lookup):
@@ -396,13 +446,13 @@ def test_crisis_precedes_off_topic_and_reports_outage(api):
     assert provider.calls == ["synthesis"]
 
 
-def test_off_topic_is_answered_by_the_model(api):
+def test_crisis_language_is_never_declined_as_out_of_scope(api):
     client, provider = api
     provider.intent = "OFF_TOPIC"
-    result = client.post("/agentic/run", json={"prompt": "Write python code."})
-    assert result.status_code == 200
-    assert result.json()["response"] == "Model answer for: Write python code. [audited]"
-    assert provider.calls == [IntentDecision, "synthesis", AuditDecision]
+    result = client.post("/agentic/run", json={"prompt": "Write me a poem, I want to kill myself."})
+    assert result.json()["response"] not in OFF_TOPIC_REPLIES
+    assert provider.payloads[-1]["mode"] == "crisis"
+    assert IntentDecision not in provider.calls  # the instant crisis check runs before routing
 
 
 def test_unsafe_draft_never_returned(api):
@@ -509,7 +559,7 @@ def test_grief_uses_the_grief_mode_not_the_clinical_form(api):
 
 
 @pytest.mark.parametrize("category, mode", [
-    ("CRISIS", "crisis"), ("OFF_TOPIC", "off_topic"), ("GRIEF_WORKBOOK", "grief"),
+    ("CRISIS", "crisis"), ("GRIEF_WORKBOOK", "grief"),
     ("CLINICAL_QUERY", "clinical_support"), ("GENERAL_SUPPORT", "general_support"),
 ])
 def test_the_router_alone_picks_the_reply_mode(api, category, mode):
@@ -546,7 +596,7 @@ def test_failed_audit_is_retried_once_before_falling_back(api):
 
 
 def test_fallbacks_are_warm_and_not_curt():
-    for text in (SAFE_RESPONSE, OFF_TOPIC_FALLBACK_RESPONSE, CRISIS_FALLBACK_RESPONSE):
+    for text in (SAFE_RESPONSE, *OFF_TOPIC_REPLIES, CRISIS_FALLBACK_RESPONSE):
         assert "can't reliably" not in text and "don't want to guess" not in text
     assert "findahelpline.com" in CRISIS_FALLBACK_RESPONSE
     assert "I'm still here" in SAFE_RESPONSE
@@ -560,11 +610,15 @@ def test_crisis_that_fails_audit_gets_a_caring_reply_not_an_error(api):
     assert result.json()["response"] == CRISIS_FALLBACK_RESPONSE
 
 
-def test_off_topic_audit_failure_uses_the_plain_fallback(api):
-    client, provider = api
-    provider.intent = "OFF_TOPIC"
-    provider.compliant = False
-    assert client.post("/agentic/run", json={"prompt": "Write python code."}).json()["response"] == OFF_TOPIC_FALLBACK_RESPONSE
+def test_the_scope_rules_reach_the_router_writer_and_auditor():
+    from backend.ai_wrapper.agents.agent1_intent_guardrail.prompt import SYSTEM_PROMPT as ROUTER
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT as WRITER
+    from backend.ai_wrapper.agents.agent4_compliance_auditor.prompt import SYSTEM_PROMPT as AUDITOR
+    assert "judge by the scope, not by this list" in ROUTER
+    assert "When you are unsure whether a message is in scope, do not choose OFF_TOPIC" in ROUTER
+    assert "Do no general-assistant work on any other subject" in WRITER
+    assert "Answer it yourself" not in WRITER
+    assert "Keep that answer intact" not in AUDITOR
 
 
 def test_a_reply_that_echoes_the_user_is_rewritten_once(api):
