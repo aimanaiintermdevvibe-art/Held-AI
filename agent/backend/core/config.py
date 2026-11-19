@@ -32,11 +32,14 @@ class Settings(BaseSettings):
     # a runaway answer from running up the bill.
     gemini_max_output_tokens: int = Field(default=8192, ge=1024, le=65536)
     # Testing aid: show each reply's token use in /run, /stream and the messages API. It is
-    # stored with the reply either way.
-    show_token_usage: bool = True
+    # stored with the reply either way. Off by default: the app does not need it.
+    show_token_usage: bool = False
     # Local testing only: serve Swagger at /docs (and the schema at /openapi.json). Keep it off in
     # production, so the API's map is not public.
     show_api_docs: bool = False
+    # The country whose verified crisis and support lines replies give (the Held database does
+    # not record a user's country). One without a list gets Find A Helpline.
+    support_country: str = "US"
 
     # Held Backend API (user profiles and grief notes)
     held_api_base_url: str = ""

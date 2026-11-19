@@ -10,7 +10,7 @@ Held AI is the chat backend for the Held app. It gives mental-health, caregiving
 4. Agent 3 writes the reply in plain, human language and avoids stock phrases.
 5. Agent 4 reviews it for safety.
 
-Held only talks about mental health, wellbeing, caregiving and grief. A message on any other subject (space, sport, coding, math, recipes, general knowledge and so on) gets a short, fixed reply saying so, and no answer is written. Feelings about any subject, such as stress about an exam, are still supported.
+Held only talks about mental health, wellbeing, caregiving and grief. A message on any other subject (space, sport, coding, math, recipes, general knowledge and so on) gets a short, fixed reply saying so, and no answer is written. Feelings about any subject, such as stress about an exam, are still supported. The fixed reply is never used in a chat where the user's own risk came up, and fear, paranoia or safety worries are always in scope.
 
 The turn is saved in one database write.
 
@@ -47,7 +47,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-All 386 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
+All 418 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
 
 **4. Run.**
 
@@ -118,4 +118,7 @@ The response is `{"response": "...", "session_id": "...", "session": {...}}`. Se
 
 - **Gemini calls** are retried on temporary failures, and each answer is capped at 8,192 tokens.
 - **Token logging:** every reply logs a `usage turn ...` line with its tokens and estimated cost.
-- **Crisis safety:** crisis replies keep their safety wording, and the instant crisis check runs on every message.
+- **Crisis safety:** the instant crisis check runs on every message (English, Spanish and Roman Urdu). Crisis replies follow a step-by-step protocol (thoughts, plan, access to means, timing), put safety actions first when the danger is immediate, and are never left unanswered: when Gemini is unavailable (a rate limit or an outage), a message that may show risk gets a fixed crisis reply with 988 and 911 instead of an error.
+- **Support lines:** replies give only the verified lines in `backend/ai_wrapper/support_resources.py` (for the US: 988, 911, Poison Control, the National Domestic Violence Hotline, Crisis Text Line, the ANAD helpline and suicide-loss support). The first crisis reply in a chat always carries one; code adds it when the reply did not. The country comes from `SUPPORT_COUNTRY` (default `US`); any other country gets Find A Helpline. Check the list before launch.
+- **Rate limits:** a Gemini rate limit is waited out once when the wait is 10 seconds or less. Use a paid Gemini key in production: each message makes about 4 model calls.
+- **Privacy:** a rejected request (422) says what is wrong but never echoes the prompt back. Token use is stored with each reply but shown to the app only when `SHOW_TOKEN_USAGE` is on (off by default).

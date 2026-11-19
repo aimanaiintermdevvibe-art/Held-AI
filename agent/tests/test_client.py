@@ -90,6 +90,46 @@ def test_a_rate_limit_with_one_key_is_reported_at_once(gemini):
     assert len(models.calls) == 1
 
 
+class RateLimited(APIError):
+    """A 429 with Gemini's retryDelay, as google.genai reports it."""
+
+    def __init__(self, seconds: int) -> None:
+        super().__init__(429)
+        self.args = (f"429 RESOURCE_EXHAUSTED. {{'retryDelay': '{seconds}s'}}",)
+
+
+@pytest.fixture
+def slept(monkeypatch):
+    waits: list[float] = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr("backend.ai_wrapper.client.asyncio.sleep", sleep)
+    return waits
+
+
+def test_a_short_rate_limit_is_waited_out_once(gemini, slept):
+    client, models = gemini(RateLimited(3), Reply())
+    assert ask(client) == "Hello"
+    assert len(models.calls) == 2 and slept == [3]
+
+
+def test_a_long_rate_limit_is_reported_at_once(gemini, slept):
+    client, models = gemini(RateLimited(39), Reply())
+    with pytest.raises(ProviderBusyError) as raised:
+        ask(client)
+    assert raised.value.retry_after == 39
+    assert len(models.calls) == 1 and slept == []
+
+
+def test_a_rate_limit_is_waited_out_only_once(gemini, slept):
+    client, models = gemini(RateLimited(3), RateLimited(3), Reply())
+    with pytest.raises(ProviderBusyError):
+        ask(client)
+    assert len(models.calls) == 2 and slept == [3]
+
+
 def test_a_rate_limited_agent_key_moves_straight_to_the_shared_key(gemini):
     client, models = gemini(APIError(429), Reply())
     assert ask(client, api_key="agent-key") == "Hello"

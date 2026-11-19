@@ -59,14 +59,47 @@ _RISK_WITHIN_LOSS = (
 )
 
 
+# The same first-person risk in Spanish and Roman Urdu, the other languages users write in.
+_OTHER_LANGUAGE_RISK = (
+    r"\b(?:quiero|quisiera|deseo|voy a|pienso|estoy pensando en)\s+(?:morir(?:me)?|matarme|suicidarme|quitarme la vida)\b",
+    r"\bme\s+quiero\s+(?:morir|matar|suicidar)\b",
+    r"\bno\s+quiero\s+(?:vivir|seguir viviendo|estar vivo|estar viva)\b",
+    r"\bkhud\s?kushi\s+(?:karna|kar\s+(?:lun|loon|lunga|lungi|leta|leti))\b",
+    r"\b(?:marna|mar\s+jana)\s+chaht[ai]\b",
+    r"\bjeena\s+nahi\s+chaht[ai]\b",
+)
+
+# Wider than the instant check: words that may mean the user is at risk. Never used to route a
+# message. Used only to choose the safe side: a crisis reply with the crisis lines when the AI
+# cannot answer, and no out-of-scope decline in a chat where risk came up.
+_POSSIBLE_RISK = (
+    r"\b(?:die|dying|suicid\w*|sucide|overdos\w*|self[- ]?harm|kms|kys|morir|matarme|suicidarme|khud\s?kushi)\b",
+    r"\b(?:kill(?:ing)?|hurt(?:ing)?|cut(?:ting)?|harm(?:ing)?)\s+(?:myself|me)\b",
+    r"\b(?:end|ending)\s+(?:it all|my life|it)\b|\btake my (?:own )?life\b",
+    r"\b(?:can'?t|cannot)\s+go on\b|\bno puedo m[a\u00e1]s\b|\bbetter off without me\b",
+    r"\b(?:don'?t|do not)\s+want\s+to\s+(?:live|be here|be alive|wake up|exist)\b",
+    r"\b(?:took|swallowed|taken)\b.{0,30}\b(?:pills|tablets)\b",
+)
+
+
 def _any(patterns: tuple[str, ...], text: str) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
-def has_immediate_crisis_language(text: str) -> bool:
-    normalized = " ".join(text.lower().replace("\u2019", "'").split())
+def _normalized(text: str) -> str:
+    return " ".join(text.lower().replace("\u2019", "'").split())
 
-    if _any(_FIRST_PERSON_RISK, normalized):
+
+def may_be_at_risk(text: str) -> bool:
+    """Whether a message may be about the user's own risk (wider than the instant check)."""
+    normalized = _normalized(text or "")
+    return has_immediate_crisis_language(normalized) or _any(_POSSIBLE_RISK, normalized)
+
+
+def has_immediate_crisis_language(text: str) -> bool:
+    normalized = _normalized(text)
+
+    if _any(_FIRST_PERSON_RISK, normalized) or _any(_OTHER_LANGUAGE_RISK, normalized):
         return True
     is_loss_story = _any(_LOSS_NARRATIVE, normalized)
     if is_loss_story and _any(_RISK_WITHIN_LOSS, normalized):

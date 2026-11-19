@@ -51,12 +51,17 @@ def _is_transient(error: Exception) -> bool:
     return isinstance(error, (TimeoutError, ConnectionError))
 
 
+def _retry_delay(error: Exception | None) -> int | None:
+    """The wait, in seconds, that Gemini asks for in a rate-limit error, when it gives one."""
+    delay = re.search(r"retryDelay'?:\s*'?(\d+)", str(error))
+    return int(delay.group(1)) if delay else None
+
+
 def _provider_failure(message: str, error: Exception | None) -> RuntimeError:
     """Log the real provider error and map rate limits to ProviderBusyError."""
     logger.warning("%s: %s", message, error)
     if getattr(error, "code", None) == 429:
-        delay = re.search(r"retryDelay'?:\s*'?(\d+)", str(error))
-        return ProviderBusyError(int(delay.group(1)) if delay else None)
+        return ProviderBusyError(_retry_delay(error))
     return RuntimeError(message)
 
 
@@ -77,9 +82,11 @@ class GeminiClient:
     # A request that fails for a passing reason (a 5xx such as "model overloaded", a timeout)
     # is tried again after a short pause, at most MAX_ATTEMPTS times in all, with low thinking
     # from the second attempt on and finally the shared key, when the agent has its own. A rate
-    # limit is tried again only with another key; other errors are not tried again.
+    # limit is tried again with another key, or, when there is none, once after the wait Gemini
+    # asks for if that is short; other errors are not tried again.
     MAX_ATTEMPTS = 3
     RETRY_DELAYS_SECONDS = (0.5, 1.5)
+    MAX_RATE_LIMIT_WAIT_SECONDS = 10
 
     def __init__(self, settings: "Settings") -> None:
         self.settings = settings
@@ -144,6 +151,7 @@ class GeminiClient:
         last_error: Exception | None = None
         index: int | None = 0
         retries = 0
+        waited_for_limit = False
         while index is not None:
             key, level = attempts[index]
             later = range(index + 1, len(attempts))
@@ -166,8 +174,16 @@ class GeminiClient:
                 raise
             except Exception as exc:
                 last_error = exc
-                if _status(exc) == 429:  # only another key can help
-                    index = next((i for i in later if attempts[i][0] != key), None)
+                if _status(exc) == 429:  # another key, or a short wait, can help
+                    other_key = next((i for i in later if attempts[i][0] != key), None)
+                    wait = _retry_delay(exc)
+                    if (other_key is None and not waited_for_limit and wait is not None
+                            and wait <= self.MAX_RATE_LIMIT_WAIT_SECONDS):
+                        waited_for_limit = True
+                        logger.warning("%s hit the rate limit; trying again in %ss", label, wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    index = other_key
                 elif _is_transient(exc):
                     index = later[0] if later else None
                 else:

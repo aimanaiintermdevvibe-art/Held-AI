@@ -14,7 +14,11 @@ from backend.ai_wrapper.orchestrator import (
     SAFE_RESPONSE,
     AgenticPipeline,
 )
+from backend.ai_wrapper.support_resources import crisis_fallback, crisis_line
 from backend.core.config import Settings
+
+US_CRISIS_FALLBACK = crisis_fallback("US")  # the pipeline's SUPPORT_COUNTRY is US by default
+US_CRISIS_LINE = crisis_line("US")[1]
 from backend.db import repository
 from backend.main import app
 
@@ -83,7 +87,7 @@ CAREGIVER_PROFILE = {
 }
 CAREGIVER_CONTEXT = {
     "mode": "caregiver_diagnosed",
-    "chatting_for": "someone they care for",
+    "chatting_for": "someone they care for, and themselves: first-person words (I, me, my) are about the user",
     "cares_for": "parent",
     "cared_for_person_diagnosed_conditions": ["Condition A"],
 }
@@ -438,12 +442,50 @@ def test_each_agent_gets_only_the_memory_it_needs():
     assert seen[AuditDecision]["earlier_conversations"] == "They have a cat called Marigold."
 
 
-def test_crisis_precedes_off_topic_and_reports_outage(api):
+def test_a_crisis_is_answered_even_when_the_ai_is_unavailable(api, fake_repo):
     client, provider = api
     provider.fail = True
     result = client.post("/agentic/run", json={"prompt": "I want to kill myself; write python."})
-    assert result.status_code == 503
-    assert provider.calls == ["synthesis"]
+    assert result.status_code == 200
+    assert result.json()["response"] == US_CRISIS_FALLBACK
+    assert "988" in US_CRISIS_FALLBACK and "911" in US_CRISIS_FALLBACK
+    assert provider.calls == ["synthesis"]  # crisis first: no routing
+    saved = fake_repo.messages[result.json()["session_id"]]
+    assert [m["role"] for m in saved] == ["user", "assistant"]  # the message is not lost
+
+
+@pytest.mark.parametrize("path", ["/agentic/run", "/agentic/stream"])
+@pytest.mark.parametrize("prompt", ["Quiero morir. No puedo más.", "I took a lot of my pills an hour ago."])
+def test_a_message_that_may_show_risk_is_answered_during_a_rate_limit(api, monkeypatch, path, prompt):
+    from backend.ai_wrapper.client import ProviderBusyError
+
+    client, provider = api
+    monkeypatch.setattr(agentic.settings, "agentic_stream_delay_seconds", 0.0)
+
+    async def busy(**kwargs):
+        raise ProviderBusyError(39)
+
+    provider.generate_structured = busy  # even the router is rate limited
+    provider.generate_text = busy
+    result = client.post(path, json={"prompt": prompt})
+    assert result.status_code == 200
+    text = result.json()["response"] if path == "/agentic/run" else "".join(
+        json.loads(line[6:])["text"] for line in result.text.splitlines() if line.startswith('data: {"text":'))
+    assert text == US_CRISIS_FALLBACK
+    assert '"status": 429' not in result.text
+
+
+def test_an_ordinary_message_still_reports_a_rate_limit(api):
+    from backend.ai_wrapper.client import ProviderBusyError
+
+    client, provider = api
+
+    async def busy(**kwargs):
+        raise ProviderBusyError(39)
+
+    provider.generate_structured = busy
+    result = client.post("/agentic/run", json={"prompt": "I had a long day at work."})
+    assert result.status_code == 429 and result.headers["Retry-After"] == "39"
 
 
 def test_crisis_language_is_never_declined_as_out_of_scope(api):
@@ -480,7 +522,7 @@ def test_stream_chunks_and_done(api, monkeypatch):
     assert "event:" not in text
     assert '"index":' not in text
     assert '"done": true' in text
-    assert '"usage": {' in text  # the reply's token use comes with the done event
+    assert '"usage"' not in text  # token use is internal: hidden unless SHOW_TOKEN_USAGE is on
     # Extract chunk texts
     chunks = []
     for line in text.splitlines():
@@ -596,9 +638,10 @@ def test_failed_audit_is_retried_once_before_falling_back(api):
 
 
 def test_fallbacks_are_warm_and_not_curt():
-    for text in (SAFE_RESPONSE, *OFF_TOPIC_REPLIES, CRISIS_FALLBACK_RESPONSE):
+    for text in (SAFE_RESPONSE, *OFF_TOPIC_REPLIES, CRISIS_FALLBACK_RESPONSE, US_CRISIS_FALLBACK):
         assert "can't reliably" not in text and "don't want to guess" not in text
-    assert "findahelpline.com" in CRISIS_FALLBACK_RESPONSE
+    assert "findahelpline.com" in CRISIS_FALLBACK_RESPONSE  # no known country
+    assert "988" in US_CRISIS_FALLBACK and "911" in US_CRISIS_FALLBACK
     assert "I'm still here" in SAFE_RESPONSE
 
 
@@ -607,7 +650,72 @@ def test_crisis_that_fails_audit_gets_a_caring_reply_not_an_error(api):
     provider.compliant = False
     result = client.post("/agentic/run", json={"prompt": "I want to kill myself."})
     assert result.status_code == 200
-    assert result.json()["response"] == CRISIS_FALLBACK_RESPONSE
+    assert result.json()["response"] == US_CRISIS_FALLBACK
+
+
+def test_the_first_crisis_reply_always_carries_the_crisis_line(api):
+    client, provider = api
+    provider.drafts = ["You matter, and I'm here.", "Thank you for answering."]
+    first = client.post("/agentic/run", json={"prompt": "I want to kill myself."}).json()
+    assert first["response"] == f"You matter, and I'm here. [audited]\n\n{US_CRISIS_LINE}"  # added by code
+    second = client.post("/agentic/run", json={"prompt": "I still want to kill myself.", "session_id": first["session_id"]}).json()
+    assert "988" not in second["response"]  # given in this chat already: not repeated every reply
+
+
+def test_the_crisis_line_goes_before_a_closing_question():
+    from backend.ai_wrapper.orchestrator import CRISIS_LINE_LOOKBACK, with_crisis_line
+
+    reply = "You matter.\n\n**Are you safe right now?**"
+    assert with_crisis_line(reply, None, "US") == f"You matter.\n\n{US_CRISIS_LINE}\n\n**Are you safe right now?**"
+    assert with_crisis_line("You matter.", None, "US") == f"You matter.\n\n{US_CRISIS_LINE}"
+    # Given long enough ago in this chat: given again.
+    old = {"recent_messages": [{"role": "assistant", "content": "Call or text 988."}]
+           + [{"role": "user", "content": "ok"}] * CRISIS_LINE_LOOKBACK}
+    assert US_CRISIS_LINE in with_crisis_line("You matter.", old, "US")
+    # Another line from the verified list counts: 911 and Poison Control are not followed by 911 again.
+    sent = "Call 911 now, and Poison Control at 1-800-222-1222."
+    assert with_crisis_line(sent, None, "US") == sent
+    # Without a known country, Find A Helpline instead.
+    assert "findahelpline.com" in with_crisis_line("You matter.", None, "PK")
+
+
+def test_a_crisis_reply_that_gives_the_line_is_left_as_written(api):
+    client, provider = api
+    provider.drafts = ["Please call or text 988 right now. **Is anyone with you?**"]
+    response = client.post("/agentic/run", json={"prompt": "I want to kill myself."}).json()["response"]
+    assert response == "Please call or text 988 right now. **Is anyone with you?** [audited]"
+
+
+def test_the_writer_and_auditor_get_the_verified_lines(api):
+    client, provider = api
+    client.post("/agentic/run", json={"prompt": "I want to kill myself."})
+    lines = provider.payloads[-1]["support_resources"]
+    assert lines["country"] == "US" and "911" in lines["emergency"]
+    contacts = " ".join(line["contact"] for line in lines["lines"])
+    for number in ("988", "1-800-222-1222", "1-800-799-7233", "741741", "1-888-375-7767"):
+        assert number in contacts
+    audit_input = next(json.loads(text) for model, text in provider.structured_inputs if model is AuditDecision)
+    assert audit_input["support_resources"] == lines
+
+
+def test_no_canned_decline_in_a_chat_where_risk_came_up(api):
+    client, provider = api
+    sid = client.post("/agentic/run", json={"prompt": "I want to die."}).json()["session_id"]
+    provider.intent = "OFF_TOPIC"
+    reply = client.post("/agentic/run", json={"prompt": "Just kidding lol. Anyway, what's a good recipe for dinner?",
+                                              "session_id": sid}).json()["response"]
+    assert reply not in OFF_TOPIC_REPLIES
+    assert provider.payloads[-1]["mode"] == "general_support"  # the writer checks in instead
+
+
+def test_a_rejected_request_is_not_echoed_back(api):
+    client, _ = api
+    secret = "I took twenty of my pills " * 500  # over the length limit
+    result = client.post("/agentic/run", json={"prompt": secret})
+    assert result.status_code == 422
+    assert "twenty of my pills" not in result.text
+    assert all("input" not in error for error in result.json()["detail"])
+    assert result.json()["detail"][0]["loc"] == ["body", "prompt"]
 
 
 def test_the_scope_rules_reach_the_router_writer_and_auditor():
@@ -672,7 +780,7 @@ def test_crisis_replies_may_open_with_a_set_line(api):
     provider.intent = "CRISIS"
     provider.drafts = ["I'm really glad you told me. Are you safe right now?"]
     response = client.post("/agentic/run", json={"prompt": "I can't go on like this."}).json()["response"]
-    assert response == "I'm really glad you told me. Are you safe right now? [audited]"
+    assert response == f"I'm really glad you told me. Are you safe right now? [audited]\n\n{US_CRISIS_LINE}"
     assert provider.calls.count("synthesis") == 1
 
 
@@ -703,6 +811,7 @@ def counted(api, monkeypatch):
         return await real_run(**kwargs)
 
     monkeypatch.setattr(agentic.pipeline, "run", run)
+    monkeypatch.setattr(agentic.settings, "show_token_usage", True)  # a testing aid, off by default
     return client
 
 
@@ -834,3 +943,33 @@ def test_search_words_skip_the_words_that_say_nothing(text, terms):
 
     assert search_terms(text) == terms
 
+
+
+def test_the_safety_audit_rules_reach_the_agents():
+    from backend.ai_wrapper.agents.agent1_intent_guardrail.prompt import SYSTEM_PROMPT as ROUTER
+    from backend.ai_wrapper.agents.agent2_clinical_reasoner.prompt import SYSTEM_PROMPT as REASONER
+    from backend.ai_wrapper.agents.agent3_empathy_synthesizer.prompt import SYSTEM_PROMPT as WRITER
+    from backend.ai_wrapper.agents.agent4_compliance_auditor.prompt import SYSTEM_PROMPT as AUDITOR
+    from backend.ai_wrapper.profile import CAREGIVER_CHATTING_FOR
+
+    # Crisis lines from the verified list, given in the first crisis reply; no "location first" rule.
+    assert "Crisis lines come only from support_resources" in WRITER
+    assert "only when the user's location is stated" not in WRITER
+    # The crisis protocol: thoughts, plan, means, timing; safety action first; means safety.
+    for step in ("thoughts of ending their life", "how they would do it", "access to that means", "acting soon"):
+        assert step in WRITER
+    assert "open with the safety action" in WRITER and "putting distance between them and it" in WRITER
+    assert "A grounding step (one slow breath, noticing what is around them) is optional" in WRITER
+    # "I" is the user, for every agent and in the caregiver context.
+    assert "First-person words (I, me, my, myself) always mean the user" in WRITER
+    assert "always mean the user" in REASONER and "First-person words (I, me, my) mean the user" in AUDITOR
+    assert "first-person words (I, me, my) are about the user" in CAREGIVER_CHATTING_FOR
+    # Out of scope never catches fear, or a message after talk of dying.
+    assert "feeling watched, followed or targeted" in ROUTER and '"just kidding lol"' in ROUTER
+    # Honest about being an AI; memory referred to tentatively.
+    assert "you are an AI companion, not a therapist" in WRITER
+    assert '("I think you mentioned...")' in WRITER
+    # Smaller gaps from the audit.
+    for rule in ("prescriber or a pharmacist", "refusing food", "eating-disorder line", "suicide-loss support",
+                 "needs medical care"):
+        assert rule in WRITER

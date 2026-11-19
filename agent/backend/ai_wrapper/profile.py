@@ -16,6 +16,10 @@ RELATION_NAMES = {
 }
 
 
+# A caregiver also writes about their own life, health and safety: "I" is always the user.
+CAREGIVER_CHATTING_FOR = "someone they care for, and themselves: first-person words (I, me, my) are about the user"
+
+
 def user_context(profile: dict | None) -> dict | None:
     """Prompt-ready facts about who the user is chatting for; None until they have onboarded."""
     if not profile or profile.get("role") not in ("SELF", "CAREGIVER"):
@@ -27,7 +31,7 @@ def user_context(profile: dict | None) -> dict | None:
     ]
     context: dict = {
         "mode": f"{'caregiver' if caregiver else 'myself'}_{'diagnosed' if conditions else 'undiagnosed'}",
-        "chatting_for": "someone they care for" if caregiver else "themselves",
+        "chatting_for": CAREGIVER_CHATTING_FOR if caregiver else "themselves",
     }
     if caregiver:
         relation = profile.get("relation")

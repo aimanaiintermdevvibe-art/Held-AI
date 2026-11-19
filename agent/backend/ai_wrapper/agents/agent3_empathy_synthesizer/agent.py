@@ -21,15 +21,19 @@ class EmpathySynthesizerAgent(BaseAgent):
         notes: list[dict] | None = None,
         note_tools: NoteTools | None = None,
         is_note: bool = False,
+        resources: dict | None = None,
     ) -> str:
         """note_tools offers the read-only grief note tools (the model decides whether to call
-        them); notes are the results of tools already called for this message, given as data."""
+        them); notes are the results of tools already called for this message, given as data.
+        resources are the verified support lines, the only numbers a reply may give."""
         payload = {
             "message": message,
             "analysis": analysis.model_dump() if analysis else None,
             "mode": mode,
             "revision_feedback": audit_feedback or [],
         }
+        if resources:
+            payload["support_resources"] = resources
         if is_note:
             payload["is_note"] = True  # message is a grief note sent from the app, not a question
         if user_context:

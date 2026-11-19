@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from backend.api.routers import agentic, sessions
 from backend.core.config import get_settings
@@ -25,6 +27,15 @@ def docs_urls(show: bool) -> dict:
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan, **docs_urls(get_settings().show_api_docs))
 app.include_router(agentic.router)
 app.include_router(sessions.router)
+
+
+@app.exception_handler(RequestValidationError)
+async def _invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """422 with where and why the request is invalid, but never what was sent: a rejected prompt
+    can hold a sensitive disclosure, so it is not echoed back (FastAPI's default does)."""
+    errors = [{"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")}
+              for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 def _openapi_with_bearer() -> dict:

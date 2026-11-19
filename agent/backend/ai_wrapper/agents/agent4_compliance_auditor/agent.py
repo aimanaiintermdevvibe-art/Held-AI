@@ -12,9 +12,18 @@ class ComplianceAuditorAgent(BaseAgent):
         self, *, draft: str, answer_mode: str = "general_support", memory: dict | None = None,
         user_context: dict | None = None,
         notes: list[dict] | None = None,
+        resources: dict | None = None,
     ) -> AuditDecision:
         payload = {"mode": answer_mode, "draft": draft}
         note = ""
+        if resources:
+            payload["support_resources"] = resources
+            note += (
+                "\nsupport_resources is the verified list of support lines for the user's country. "
+                "Keep every resource the draft gives from it. Any phone number, text code or link "
+                "for a support service that is not in that list must be removed or replaced with "
+                "the matching one from the list."
+            )
         if user_context:
             payload["user_context"] = user_context
             note += (

@@ -1,5 +1,7 @@
+import logging
+
 from backend.ai_wrapper.agents.agent1_intent_guardrail import IntentGuardrailAgent
-from backend.ai_wrapper.agents.agent1_intent_guardrail.policy import has_immediate_crisis_language
+from backend.ai_wrapper.agents.agent1_intent_guardrail.policy import has_immediate_crisis_language, may_be_at_risk
 from backend.ai_wrapper.agents.agent2_clinical_reasoner import ClinicalReasoningAgent
 from backend.ai_wrapper.agents.agent3_empathy_synthesizer import EmpathySynthesizerAgent
 from backend.ai_wrapper.agents.agent3_empathy_synthesizer.openings import (
@@ -23,8 +25,11 @@ from backend.ai_wrapper.memory import (
     with_recalled,
 )
 from backend.ai_wrapper.profile import user_context
+from backend.ai_wrapper.support_resources import crisis_fallback, crisis_line, support_resources
 from backend.grief.note_tools import NoteTools, NotesShowCrisis
 from backend.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 SAFE_RESPONSE = (
     "I'm sorry, I wasn't able to put together a good reply just now. "
@@ -33,20 +38,20 @@ SAFE_RESPONSE = (
 # Held supports mental health, caregiving and grief only. Anything else (space, sport, coding,
 # recipes, general knowledge...) gets one of these, from code: no reply is written for it, so an
 # answer cannot slip through. They take turns within a chat so a repeated ask is not met with
-# the same words.
+# the same words. Never used in a chat where the user's own risk came up.
 OFF_TOPIC_REPLIES = (
-    "That's outside what I can help with. I'm here for mental health, caregiving and grief "
-    "support, so if something is on your mind, we can talk about it.",
-    "I can't help with that one, as I only support mental health, caregiving and grief. "
-    "**Is there something you're going through that you'd like to talk about?**",
-    "That's not something I can help with here. My focus is mental health, caregiving and "
-    "grief, and if you'd like to talk about how you're doing, I'm listening.",
+    "I'm not able to help with that one, because I'm here for mental health, caregiving and "
+    "grief support. If anything is weighing on you, though, I'd really like to hear about it.",
+    "That's outside what I can help with, since my focus is mental health, caregiving and grief. "
+    "**Is something on your mind that you'd like to talk through?**",
+    "I can't help with that here, as I only support mental health, caregiving and grief. If you'd "
+    "like to talk about how you're feeling or what you're dealing with, I'm listening.",
 )
-CRISIS_FALLBACK_RESPONSE = (
-    "I'm really glad you reached out, and I'm staying right here with you. "
-    "If you are in immediate danger, please contact local emergency services or visit "
-    "https://findahelpline.com right now."
-)
+# Without a known country; the pipeline uses the verified lines for SUPPORT_COUNTRY.
+CRISIS_FALLBACK_RESPONSE = crisis_fallback(None)
+# How many of the latest messages a crisis reply looks back over before giving the crisis line
+# again: given in the first crisis reply of a chat, then not in every reply.
+CRISIS_LINE_LOOKBACK = 10
 
 MAX_ATTEMPTS = 2
 
@@ -84,6 +89,29 @@ def off_topic_reply(memory: dict | None) -> str:
     return OFF_TOPIC_REPLIES[(OFF_TOPIC_REPLIES.index(used[-1]) + 1) % len(OFF_TOPIC_REPLIES)]
 
 
+def risk_came_up(memory: dict | None) -> bool:
+    """Whether this chat holds a sign of the user's own risk (their messages or its summary)."""
+    chat = current_chat(memory) or {}
+    texts = [m.get("content") or "" for m in chat.get("recent_messages") or [] if m.get("role") == "user"]
+    return any(may_be_at_risk(text) for text in [*texts, chat.get("summary") or ""])
+
+
+def with_crisis_line(reply: str, memory: dict | None, country: str | None) -> str:
+    """A crisis reply always carries the crisis line: added by code when neither the reply nor
+    this chat's latest messages gave it. It goes before a closing question."""
+    markers, line = crisis_line(country)
+    recent = ((current_chat(memory) or {}).get("recent_messages") or [])[-CRISIS_LINE_LOOKBACK:]
+    given = [reply] + [m.get("content") or "" for m in recent if m.get("role") == "assistant"]
+    if any(marker in text.lower() for marker in markers for text in given):
+        return reply
+    paragraphs = reply.rstrip().split("\n\n")
+    if len(paragraphs) > 1 and paragraphs[-1].rstrip().rstrip("*").endswith("?"):
+        paragraphs.insert(len(paragraphs) - 1, line)
+    else:
+        paragraphs.append(line)
+    return "\n\n".join(paragraphs)
+
+
 class AgenticPipeline:
     def __init__(self, client: GeminiClient, settings: Settings) -> None:
         self.intent_agent = IntentGuardrailAgent(
@@ -98,8 +126,25 @@ class AgenticPipeline:
         self.audit_agent = ComplianceAuditorAgent(
             client, settings.gemini_agent4_model, settings.gemini_agent4_thinking_level, settings.gemini_agent4_api_key or None
         )
+        # The verified support lines replies may give (the writer and the auditor see them).
+        self.country = settings.support_country
+        self.resources = support_resources(self.country)
 
-    async def _respond(
+    async def _respond(self, prompt: str, *, mode: str = "general_support", **kwargs) -> str:
+        """The reply. A crisis is always answered: when the AI cannot write the reply, a fixed
+        crisis reply with the crisis lines is sent instead of an error, and a written crisis reply
+        always carries the crisis line."""
+        if mode != "crisis":
+            return await self._write(prompt, mode=mode, **kwargs)
+        try:
+            reply = await self._write(prompt, mode=mode, **kwargs)
+        except (RuntimeError, ValueError) as exc:
+            logger.warning("Crisis reply could not be written (%s); sending the fixed crisis reply",
+                           type(exc).__name__)
+            return crisis_fallback(self.country)
+        return with_crisis_line(reply, kwargs.get("memory"), self.country)
+
+    async def _write(
         self, prompt: str, *, mode: str = "general_support", analysis=None, memory=None, context=None,
         notes=None, note_tools=None, is_note=False,
     ) -> str:
@@ -123,6 +168,7 @@ class AgenticPipeline:
                     notes=found or notes,
                     note_tools=None if found else note_tools,
                     is_note=is_note,
+                    resources=self.resources,
                 )).strip()
             except NotesShowCrisis:
                 # Crisis language in a retrieved note takes the same path as one in a message.
@@ -161,6 +207,7 @@ class AgenticPipeline:
             audit = await self.audit_agent.run(
                 draft=draft, answer_mode=mode, memory=review_memory, user_context=context,
                 notes=(note_tools.results if note_tools and note_tools.results else None) or notes,
+                resources=self.resources,
             )
             if audit.compliant and audit.final_text.strip():
                 return _clean(audit.final_text)
@@ -183,10 +230,9 @@ class AgenticPipeline:
         decision = await self.intent_agent.run(message="\n\n".join(texts)[:6000])
         return decision.category == "CRISIS"
 
-    @staticmethod
-    def _fallback(mode: str) -> str:
+    def _fallback(self, mode: str) -> str:
         if mode == "crisis":
-            return CRISIS_FALLBACK_RESPONSE
+            return crisis_fallback(self.country)
         return SAFE_RESPONSE
 
     async def run(
@@ -201,7 +247,26 @@ class AgenticPipeline:
 
         Each agent gets only the memory it needs: the router the user's messages and the last
         few turns of this chat, the reasoner a few more, the writer everything, and the auditor
-        the user's side."""
+        the user's side.
+
+        A message that may be about the user's own risk is never left unanswered: when the AI
+        is unavailable (a rate limit, an outage) it gets the fixed crisis reply instead of an
+        error."""
+        try:
+            return await self._run(prompt=prompt, memory=memory, profile=profile, notes=notes,
+                                   recall=recall, note_tools=note_tools, is_note=is_note)
+        except (RuntimeError, ValueError) as exc:
+            if not may_be_at_risk(prompt):
+                raise
+            logger.warning("Reply could not be written (%s) for a message that may show risk; "
+                           "sending the fixed crisis reply", type(exc).__name__)
+            return crisis_fallback(self.country)
+
+    async def _run(
+        self, *, prompt: str, memory: dict | None, profile: dict | None, notes: list[dict] | None,
+        recall: "Callable[[str], Awaitable[list[dict]]] | None", note_tools: "NoteTools | None",
+        is_note: bool,
+    ) -> str:
         context = user_context(profile)
         notes = notes or None  # the user's grief notes, only when the message refers to them
         # note_tools: the read-only grief note tools, bound to the signed-in user; the writer decides
@@ -218,9 +283,15 @@ class AgenticPipeline:
             mode = "grief"
             reply["note_tools"] = None
         if mode == "off_topic":
-            # Outside mental health, caregiving and grief: declined without writing an answer.
-            # The instant crisis check above has already run on the message.
-            return off_topic_reply(memory)
+            if risk_came_up(memory):
+                # Never a canned decline in a chat where the user's own risk came up ("I want to
+                # die... just kidding, what's for dinner?"): the writer checks in gently and
+                # leaves the unrelated request out.
+                mode = "general_support"
+            else:
+                # Outside mental health, caregiving and grief: declined without writing an
+                # answer. The instant crisis check above has already run on the message.
+                return off_topic_reply(memory)
         # recall searches the user's earlier chats; only when the message refers back to one.
         if recall and (intent.refers_to_earlier_chats or mentions_earlier_chats(prompt)):
             memory = with_recalled(memory, await recall(intent.recall_query or prompt), prompt)

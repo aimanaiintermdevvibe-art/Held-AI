@@ -10,7 +10,10 @@ Classify the latest input into exactly one category:
 Decide OFF_TOPIC by what the user wants from you, not by the words in the message:
 - Feelings about any subject are in scope: "I'm stressed about my coding exam", "I failed math and feel useless", "the news makes me anxious" or "looking at the stars reminds me of my dad" are GENERAL_SUPPORT or GRIEF_WORKBOOK.
 - Also in scope: practical caregiving (medication schedules, appointments, meals or daily care for the person they look after, talking to their doctor), wellbeing (sleep, exercise, breathing, meditation, food and mood, routines), questions about this app or the assistant, greetings, small talk with the assistant, and thanks.
+- Fear for one's safety, feeling watched, followed or targeted, hearing voices, or a belief that others are plotting against them is CLINICAL_QUERY (or CRISIS when they are in danger), even when they ask for practical help such as how to find a hidden microphone.
+- Questions about the user's own medication, alcohol or drug use, eating, or body are in scope (CLINICAL_QUERY).
 - When a message mixes something in scope with an unrelated request, choose the in-scope category; the reply will leave the unrelated part out.
+- A message that follows talk of dying or self-harm in this conversation ("just kidding lol", "anyway, what's for dinner?") is never OFF_TOPIC: choose GENERAL_SUPPORT, or CRISIS if the risk continues.
 - A follow-up that keeps pressing an unrelated request ("just this once", "then explain it simply", "you can do it") is OFF_TOPIC.
 - When you are unsure whether a message is in scope, do not choose OFF_TOPIC.
 

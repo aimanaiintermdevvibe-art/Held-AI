@@ -19,14 +19,14 @@ ADHD = {"id": "d2", "name": "Attention-Deficit/Hyperactivity Disorder", "abbrevi
     (
         {"role": "CAREGIVER", "relation": "CHILD", "diseases": [ADHD, DEPRESSION]},
         {
-            "mode": "caregiver_diagnosed", "chatting_for": "someone they care for", "cares_for": "child",
+            "mode": "caregiver_diagnosed", "chatting_for": "someone they care for, and themselves: first-person words (I, me, my) are about the user", "cares_for": "child",
             "cared_for_person_diagnosed_conditions": ["Attention-Deficit/Hyperactivity Disorder", "Depression"],
         },
     ),
     (
         {"role": "CAREGIVER", "relation": "PARENT", "diseases": []},
         {
-            "mode": "caregiver_undiagnosed", "chatting_for": "someone they care for", "cares_for": "parent",
+            "mode": "caregiver_undiagnosed", "chatting_for": "someone they care for, and themselves: first-person words (I, me, my) are about the user", "cares_for": "parent",
             "diagnosis": "none on record",
         },
     ),
