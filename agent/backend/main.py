@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from backend.api.routers import agentic, sessions
+from backend.api.routers import agentic
 from backend.core.config import get_settings
 from backend.db.connection import close_db_pool
 
@@ -26,7 +26,6 @@ def docs_urls(show: bool) -> dict:
 
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan, **docs_urls(get_settings().show_api_docs))
 app.include_router(agentic.router)
-app.include_router(sessions.router)
 
 
 @app.exception_handler(RequestValidationError)

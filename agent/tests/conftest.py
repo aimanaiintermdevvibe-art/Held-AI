@@ -88,10 +88,6 @@ class FakeRepo:
         self.ops.append("get_chat_session")
         return self._session(session_id, user_id)
 
-    async def get_session_messages(self, session_id):
-        self.ops.append("get_session_messages")
-        return [dict(m) for m in self.messages.get(session_id, [])]
-
     async def open_chat(self, session_id, user_id=None, recent=20):
         self.ops.append("open_chat")
         session = self._session(session_id, user_id)
@@ -193,12 +189,6 @@ class FakeRepo:
         self.ops.append("mark_safety_check_in")
         self.check_ins[session_id] = raised_until
 
-    async def list_chat_sessions(self, user_id=None):
-        return [
-            {**s, "message_count": s["total_message_count"]}
-            for s in self.sessions.values() if user_id is None or s["user_id"] == user_id
-        ]
-
     async def delete_chat_session(self, session_id, user_id=None):
         self.ops.append("delete_chat_session")
         if not self._session(session_id, user_id):
@@ -222,10 +212,10 @@ class FakeRepo:
 def fake_repo(monkeypatch):
     repo = FakeRepo()
     for name in (
-        "get_auth_user", "create_chat_session", "get_chat_session", "get_session_messages",
+        "get_auth_user", "create_chat_session", "get_chat_session",
         "open_chat", "get_messages_after", "save_turn", "save_session_summary", "save_user_memory",
         "get_previous_conversations", "mark_safety_check_in", "get_user_memory", "search_past_conversations", "save_chat_profile",
-        "list_chat_sessions", "delete_chat_session", "ping_database", "get_user_profile",
+        "delete_chat_session", "ping_database", "get_user_profile",
     ):
         monkeypatch.setattr(repository, name, getattr(repo, name))
     return repo

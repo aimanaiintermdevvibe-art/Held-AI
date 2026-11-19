@@ -47,7 +47,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-All 431 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
+All 432 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
 
 **4. Run.**
 
@@ -73,7 +73,7 @@ The service uses the Held app's tables (Prisma-managed) and creates none of its 
 - **Reply modes:** the user's role (themselves or a caregiver) and conditions pick one of four modes: myself or caregiver, each with or without a diagnosis. They are read from `User`, `UserDisease` and `Disease`; while those cannot be read, they come from Held's `GET /auth/me`.
 - **User profile:** the reply mode comes from the user's role, relation and conditions, read through a read-only profile tool (`backend/tools/user_profile.py`) bound to the token's user. It is read once when a chat starts, kept with the chat (hidden from the app) and reused by that chat's later messages; a new chat reads it afresh.
 - **Grief note tools:** in a chat, the writer (Agent 3) may call three read-only tools when the answer depends on the user's notes: `recent_notes` (days back, most notes), `note_by_date` (one date) and `mood_summary` (note count and mood frequencies by week). The user comes only from the session token (no tool takes a user ID); arguments are validated and clamped (90 days, 20 notes, 1,500 characters per note, 4 calls per message); unknown tools and malformed arguments are rejected. Results reach the writer and the auditor as user-written data, never instructions; crisis language in a note takes the crisis path. Dates are UTC. Each call is logged without the note text.
-- **Deleting a chat:** removes the chat, and the database's cascade removes its messages. If the database user has no delete right, the endpoint answers 403.
+- **Chat list and history:** The app lists chats, shows a chat's messages, and archives or deletes chats through Held's own API (`/chat-sessions`), which reads the same `ChatSession` and `ChatMessage` rows. This service only answers messages. It deletes a chat itself only when a new chat's first reply fails, so no empty chat is left behind.
 - **Timestamps:** times are stored in UTC, with millisecond precision. A reply is stamped 1 ms after its message, so the order is kept.
 
 Each chat message costs one database read and one write. Every 10 messages, the background summary adds one small read and one write.
@@ -87,9 +87,6 @@ Every endpoint except `/` and `/agentic/health` needs `Authorization: Bearer <He
 | `GET /`, `GET /agentic/health` | Service check. Health also reports the database |
 | `POST /agentic/run` | Send a message and get the reply as JSON |
 | `POST /agentic/stream` | The same, streamed as server-sent events |
-| `GET /agentic/sessions` | The user's chats |
-| `GET /agentic/sessions/{id}/messages` | One chat's messages |
-| `DELETE /agentic/sessions/{id}` | Delete a chat and its messages |
 
 Example request:
 

@@ -36,10 +36,9 @@ When Gemini cannot answer (a rate limit or an outage), a message that may show r
 | Endpoint | Purpose |
 | :--- | :--- |
 | `POST /agentic/run`, `POST /agentic/stream` | Send a message |
-| `GET /agentic/sessions` | The user's chats |
-| `GET /agentic/sessions/{id}/messages` | One chat |
-| `DELETE /agentic/sessions/{id}` | Delete one chat |
 | `GET /`, `GET /agentic/health` | Public checks |
+
+The app lists chats, shows a chat's messages, and archives or deletes chats through Held's own API (`/chat-sessions`), which reads the same `ChatSession` and `ChatMessage` rows. This service only answers messages.
 
 Full reference: [document/api.md](./document/api.md).
 

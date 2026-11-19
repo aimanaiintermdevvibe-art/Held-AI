@@ -19,13 +19,10 @@ Swagger is served at `/docs` only when `SHOW_API_DOCS=true`, for local testing. 
 | :--- | :--- | :--- | :--- |
 | `POST` | `/agentic/stream` | Send a message; the reply comes as server-sent events | Yes |
 | `POST` | `/agentic/run` | Send a message; the reply comes as JSON | Yes |
-| `GET` | `/agentic/sessions` | The user's chats | Yes |
-| `GET` | `/agentic/sessions/{id}/messages` | One chat and its messages | Yes |
-| `DELETE` | `/agentic/sessions/{id}` | Delete a chat and its messages | Yes |
 | `GET` | `/agentic/health` | Service and database check | No |
 | `GET` | `/` | Liveness check; touches no database | No |
 
-There are no other endpoints. User, disease, admin, document and grief-note endpoints were removed: grief notes are read by the agent's own tools during a chat (see [Grief notes in chat](#grief-notes-in-chat)).
+There are no other endpoints. User, disease, admin, document, grief-note and session endpoints were removed: grief notes are read by the agent's own tools during a chat (see [Grief notes in chat](#grief-notes-in-chat)).
 
 ## Authentication
 
@@ -137,29 +134,13 @@ data: {"detail": "The AI is getting too many requests right now. Please try agai
 
 The app should treat any event with `status` as an error: show `detail`, offer Retry, and keep the user's text. A message that may show risk (thoughts of dying, self-harm, an overdose) never gets this event: when the AI is unavailable it gets a fixed crisis reply with 988 and 911 instead.
 
-## Chats
+## Chat list and history
 
-### `GET /agentic/sessions`
+The app lists chats, shows a chat's messages, and archives or deletes chats through Held's own API (`/chat-sessions`), which reads the same `ChatSession` and `ChatMessage` rows. This service only answers messages.
 
-The user's chats, most recently updated first (an admin gets everyone's). Returns a list of chat objects, as in `session` above, plus `message_count` and `last_message_at` (the newest message's time).
-
-### `GET /agentic/sessions/{id}/messages`
-
-```json
-{
-  "session": { "id": "6f0c...", "title": "Stressful week at work", "...": "..." },
-  "messages": [
-    { "id": "...", "session_id": "6f0c...", "role": "user", "content": "I've had a really stressful week at work.", "metadata": {}, "created_at": "..." },
-    { "id": "...", "session_id": "6f0c...", "role": "assistant", "content": "A week like that...", "metadata": {}, "created_at": "..." }
-  ]
-}
-```
-
-Messages are oldest first. A message from a grief note has `"isNote": true` in its `metadata`. A reply's `metadata.usage` holds its token use, shown only when `SHOW_TOKEN_USAGE=true`. A chat that is not the user's returns `404`.
-
-### `DELETE /agentic/sessions/{id}`
-
-Deletes the chat; the database cascade deletes its messages. Returns `{"success": true}`. A chat that is not the user's returns `404`. If the database user has no delete right, the answer is `403`.
+- **Continuing a chat:** send its `session_id` with the next message to `/agentic/run` or `/agentic/stream`.
+- **Message metadata:** a grief note's message has `"isNote": true`, and a reply has its token use under `usage`. Held's API returns this `metadata` as stored, so the token use reaches the app there whatever `SHOW_TOKEN_USAGE` says.
+- **The chat's own `metadata`** holds this service's hidden memory; Held's API does not return it.
 
 ## Health
 
@@ -173,8 +154,7 @@ Deletes the chat; the database cascade deletes its messages. Returns `{"success"
 | Code | When |
 | :--- | :--- |
 | `401` | Token missing, invalid or expired, or the user is not in `User` (see [Authentication](#authentication)) |
-| `403` | Deleting a chat when the database user may not delete |
-| `404` | The chat does not exist or is not the user's |
+| `404` | The `session_id` sent is not one of the user's chats |
 | `422` | Invalid body: empty or over 10,000 characters, or an unknown field. The sent values are not echoed |
 | `429` | Gemini rate limit; the `Retry-After` header gives the wait (on the stream: the error event) |
 | `503` | The AI or the database is unavailable, or the token could not be checked |

@@ -98,30 +98,6 @@ def _set_memory(fields: str) -> str:
 # Chats
 # ==============================================================================
 
-async def list_chat_sessions(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    pool = await get_db_pool()
-    if not pool:
-        return []
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"""
-            SELECT {SESSION_COLUMNS},
-                   (SELECT MAX(m."createdAt") FROM "ChatMessage" m WHERE m."sessionId" = s.id) AS last_message_at
-            FROM "ChatSession" s
-            WHERE ($1::text IS NULL OR s."userId" = $1)
-            ORDER BY s."updatedAt" DESC, s."createdAt" DESC
-            """,
-            user_id.strip() if user_id else None,
-        )
-    result = []
-    for r in rows:
-        session = _session_dict(r)
-        session["message_count"] = session["total_message_count"]
-        session["last_message_at"] = _iso(r["last_message_at"])
-        result.append(session)
-    return result
-
-
 async def create_chat_session(
     user_id: Optional[str] = None, title: str = "New Conversation", metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -191,24 +167,6 @@ async def delete_chat_session(session_id: str, user_id: Optional[str] = None) ->
         except asyncpg.InsufficientPrivilegeError as exc:
             raise PermissionError("Chats cannot be deleted on this database.") from exc
     return result.startswith("DELETE") and not result.endswith(" 0")
-
-
-async def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
-    pool = await get_db_pool()
-    key = _key(session_id)
-    if not pool or not key:
-        return []
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            'SELECT id, "sessionId", role, content, metadata, "createdAt" FROM "ChatMessage" '
-            'WHERE "sessionId" = $1 ORDER BY "createdAt", id',
-            key,
-        )
-    return [
-        {"id": r["id"], "session_id": r["sessionId"], "role": r["role"], "content": r["content"],
-         "metadata": _json(r["metadata"]) or {}, "created_at": _iso(r["createdAt"])}
-        for r in rows
-    ]
 
 
 async def open_chat(

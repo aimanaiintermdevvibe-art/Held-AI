@@ -44,7 +44,7 @@ def test_each_note_starts_a_new_chat_marked_as_a_note(chat, fake_repo):
     assert note["session"]["metadata"] == {"isNote": True}
     assert seen[1]["is_note"] is True
     assert not (seen[1]["memory"] or {}).get("recent_messages")  # a fresh chat: nothing from the other one
-    messages = client.get(f"/agentic/sessions/{note['session_id']}/messages").json()["messages"]
+    messages = fake_repo.messages[note["session_id"]]
     assert messages[0]["metadata"] == {"isNote": True} and messages[0]["content"] == "Mood: Sad. I'm feeling sad today."
     assert "isNote" not in messages[1]["metadata"]  # the reply is not the note
     stream_session = [json.loads(l[6:]) for l in second.text.splitlines() if l.startswith("data: ")][0]["session_id"]

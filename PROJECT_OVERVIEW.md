@@ -67,7 +67,7 @@ See [document/context.md](./document/context.md).
 
 ### API
 
-`POST /agentic/run` (JSON) and `POST /agentic/stream` (server-sent events), the user's chats (list, read, delete), and public health checks. See [document/api.md](./document/api.md).
+`POST /agentic/run` (JSON) and `POST /agentic/stream` (server-sent events), and public health checks. The app's chat list and history come from Held's own API (`/chat-sessions`). See [document/api.md](./document/api.md).
 
 ## Database and external services
 
@@ -101,7 +101,6 @@ Deployments:
 - A full-text index for earlier-chat search.
 - Move the background summary jobs out of the web process if traffic grows.
 - Turn the safety audit's 63 scenarios into an automated regression test run before every prompt or model change.
-- Update `ChatSession.lastMessageAt` when a message is saved, if the app sorts by it.
 
 ## Repository map
 
@@ -114,7 +113,7 @@ Deployments:
 | [`agent/backend/grief/`](./agent/backend/grief/) | The grief note tools |
 | [`agent/backend/tools/`](./agent/backend/tools/) | The profile tool |
 | [`agent/backend/schemas/`](./agent/backend/schemas/) | Request and response models |
-| [`agent/tests/`](./agent/tests/) | 431 tests; they use an in-memory stand-in, so they need no database or Gemini |
+| [`agent/tests/`](./agent/tests/) | 432 tests; they use an in-memory stand-in, so they need no database or Gemini |
 | [`document/`](./document/) | API, memory and schema reference |
 
 ## Overall status

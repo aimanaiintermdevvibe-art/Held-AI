@@ -32,7 +32,8 @@ from backend.tools.user_profile import UserProfileTool, mode_fields
 logger = logging.getLogger("held_ai.agentic")
 
 # Generation requires a signed-in user that exists in the Held "User" table: every turn
-# is stored in chat_sessions / chat_messages and remembered on later turns.
+# is stored in "ChatSession" / "ChatMessage" and remembered on later turns. The app reads its chat
+# list and history from Held's own API, so this service serves only the chat itself.
 router = APIRouter(prefix="/agentic")
 settings = get_settings()
 gemini_client = GeminiClient(settings)

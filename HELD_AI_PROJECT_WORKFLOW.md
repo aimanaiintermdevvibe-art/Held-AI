@@ -7,7 +7,7 @@ As of 2026-11-19
 Held AI is the Held app's support companion for mental health, caregiving and grief. Every message passes an instant safety check, up to four AI agents and a final safety review before the user sees a reply.
 
 - **Running:** the backend is Python (FastAPI) on Render, using the Held app's own PostgreSQL tables and a paid Gemini key. Every request needs a Held access token; guest mode is gone.
-- **Tested:** all 431 automated tests pass. Two safety audits by the developer (63 scenarios, two accounts) were fixed and re-run live.
+- **Tested:** all 432 automated tests pass. Two safety audits by the developer (63 scenarios, two accounts) were fixed and re-run live.
 - **Scope:** Held talks only about mental health, wellbeing, caregiving and grief, and declines anything else.
 
 ## Overall workflow

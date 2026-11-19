@@ -1,4 +1,5 @@
 """The profile tool: read once per chat, through the tool layer, only what picks the mode."""
+import json
 import asyncio
 import logging
 from unittest.mock import AsyncMock
@@ -104,9 +105,9 @@ def test_the_kept_profile_is_never_shown_to_the_app(chats, fake_repo):
     client, *_ = chats
     fake_repo.profiles["usr_1"] = dict(DB_PROFILE)
     data = client.post("/agentic/run", json={"prompt": "Hi"}).json()
-    listed = client.get("/agentic/sessions").json()
-    sessions = listed if isinstance(listed, list) else listed.get("sessions", [])
-    for session in [data["session"], *sessions]:
+    stream = client.post("/agentic/stream", json={"prompt": "Again", "session_id": data["session_id"]}).text
+    events = [json.loads(line[6:]) for line in stream.splitlines() if line.startswith("data: ")]
+    for session in [data["session"], events[0]["session"], events[-1]["session"]]:
         assert "memory" not in (session.get("metadata") or {}) and "profile" not in (session.get("metadata") or {})
 
 

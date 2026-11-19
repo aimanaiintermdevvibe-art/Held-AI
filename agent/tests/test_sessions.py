@@ -33,24 +33,16 @@ def test_health_endpoint(client):
     assert res.json()["database"]["connected"] is True
 
 
-def test_list_sessions_is_scoped_to_the_caller(client, auth):
-    client.post("/agentic/run", json={"prompt": "Mine"})
-    client.post("/agentic/run", json={"prompt": "Theirs"}, headers=auth("usr_2"))
-    mine = client.get("/agentic/sessions").json()
-    assert [s["user_id"] for s in mine] == ["usr_1"]
-    assert mine[0]["title"] == "Generated title"
-    assert mine[0]["total_message_count"] == 2
-    assert len(client.get("/agentic/sessions", headers=auth("adm_1")).json()) == 2
+def test_another_users_chat_cannot_be_continued(client, auth, fake_repo):
+    sid = client.post("/agentic/run", json={"prompt": "Mine"}).json()["session_id"]
+    res = client.post("/agentic/run", json={"prompt": "Let me in", "session_id": sid}, headers=auth("usr_2"))
+    assert res.status_code == 404
+    assert [m["content"] for m in fake_repo.messages[sid]] == ["Mine", "Answer to: Mine"]  # untouched
 
 
-def test_post_session_endpoint_disallowed(client):
-    res = client.post("/agentic/sessions", json={"title": "Caregiver Support", "user_id": "usr_1"})
-    assert res.status_code == 405
-
-
-def test_get_session_details_endpoint_disallowed(client):
-    res = client.get("/agentic/sessions/22006c3e-dc6f-4862-9503-5d408ddc6c97")
-    assert res.status_code == 405
+def test_the_reply_returns_the_chat_with_its_title_and_count(client):
+    data = client.post("/agentic/run", json={"prompt": "Hello"}).json()
+    assert data["session"]["title"] == "Generated title" and data["session"]["total_message_count"] == 2
 
 
 def test_run_stores_client_metadata_but_ignores_body_user_id(client, fake_repo):
@@ -81,19 +73,3 @@ def test_stream_creates_session_then_appends(client, fake_repo):
     assert [m["content"] for m in fake_repo.messages[sid]] == [
         "Stream prompt", "Answer to: Stream prompt", "Followup", "Answer to: Followup",
     ]
-
-
-def test_get_session_messages_endpoint(client, auth):
-    sid = client.post("/agentic/run", json={"prompt": "Hello"}).json()["session_id"]
-    data = client.get(f"/agentic/sessions/{sid}/messages").json()
-    assert [m["role"] for m in data["messages"]] == ["user", "assistant"]
-    assert data["session"]["total_message_count"] == 2
-    assert client.get(f"/agentic/sessions/{sid}/messages", headers=auth("usr_2")).status_code == 404
-
-
-def test_delete_session_endpoint(client, auth, fake_repo):
-    sid = client.post("/agentic/run", json={"prompt": "Hello"}).json()["session_id"]
-    assert client.delete(f"/agentic/sessions/{sid}", headers=auth("usr_2")).status_code == 404
-    res = client.delete(f"/agentic/sessions/{sid}")
-    assert res.status_code == 200 and res.json() == {"success": True}
-    assert sid not in fake_repo.sessions

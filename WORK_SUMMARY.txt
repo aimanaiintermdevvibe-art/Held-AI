@@ -19,7 +19,7 @@ As of 2026-11-19
   stock sympathy lines, no assumed gender or details, ambiguous words asked about.
 - Token use per reply: stored in ChatMessage.metadata.usage; shown to the app only when
   SHOW_TOKEN_USAGE=true (off by default).
-- Tests: 431 passed.
+- Tests: 432 passed.
 
 2. SAFETY
 ---------

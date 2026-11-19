@@ -26,7 +26,7 @@ The agent uses the Held app's own PostgreSQL tables. The Held app (Prisma) creat
 | `sessionSummary` | text, nullable | | The rolling summary of older messages |
 | `lastSummarizedMessageId` | text, nullable | | The newest message folded into the summary |
 | `totalMessageCount` | integer | `0` | Raised by 2 with each saved turn |
-| `lastMessageAt` | timestamp | `CURRENT_TIMESTAMP` | Not written: it keeps the chat's creation time. In the testing database only |
+| `lastMessageAt` | timestamp | `CURRENT_TIMESTAMP` | Not written by the agent: the Held database's trigger `ChatMessage_last_message_at_trg` sets it whenever a message is inserted. The app's chat list is sorted by it |
 
 `userId` references `User(id)` with `ON DELETE CASCADE`.
 

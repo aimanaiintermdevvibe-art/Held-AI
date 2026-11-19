@@ -172,7 +172,7 @@ def test_background_summary_writes_session_columns(chat, fake_repo, monkeypatch)
     sid = client.post("/agentic/run", json={"prompt": "My dog Max died."}).json()["session_id"]
     client.post("/agentic/run", json={"prompt": "I miss him.", "session_id": sid})
     # The summary job runs on the app's loop after the response; one more request drains it.
-    client.get("/agentic/sessions")
+    client.get("/agentic/health")
     session = fake_repo.sessions[sid]
     assert session["session_summary"] == "User's dog Max died."
     assert session["last_summarized_message_id"] == fake_repo.messages[sid][-1]["id"]
@@ -359,7 +359,7 @@ def test_each_turn_reads_and_writes_the_chat_once(chat, fake_repo):
 
     fake_repo.ops.clear()
     client.post("/agentic/run", json={"prompt": "Work is hard.", "session_id": sid})
-    client.get("/agentic/sessions")  # lets any background job finish
+    client.get("/agentic/health")  # lets any background job finish
     # One read (session + latest messages + user memory) and one write (both messages and the count).
     assert fake_repo.ops == ["open_chat", "save_turn"]
 
@@ -371,7 +371,7 @@ def test_a_new_chat_builds_the_user_memory_that_later_replies_use(chat, fake_rep
 
     sid = client.post("/agentic/run", json={"prompt": "Hi again"}).json()["session_id"]
     assert seen[-1] is None  # the earlier chat itself is not handed to the new one
-    client.get("/agentic/sessions")  # lets the background job finish
+    client.get("/agentic/health")  # lets the background job finish
     assert fake_repo.user_memory == {"usr_1": "Their dog Max died."}
     client.post("/agentic/run", json={"prompt": "Morning"})
     assert seen[-1]["earlier_conversations"] == "Their dog Max died."  # a new chat knows it, as background
@@ -393,7 +393,7 @@ def test_a_summary_that_fell_behind_reads_the_messages_it_needs(chat, fake_repo,
     monkeypatch.setattr(agentic.gemini_client, "generate_text", AsyncMock(return_value="Counting turns."))
     fake_repo.ops.clear()
     client.post("/agentic/run", json={"prompt": "six", "session_id": sid})
-    client.get("/agentic/sessions")
+    client.get("/agentic/health")
     assert fake_repo.ops == ["open_chat", "save_turn", "get_chat_session", "get_messages_after", "save_session_summary"]
     session = fake_repo.sessions[sid]
     assert session["session_summary"] == "Counting turns."

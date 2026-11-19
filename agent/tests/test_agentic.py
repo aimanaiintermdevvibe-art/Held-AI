@@ -117,18 +117,14 @@ def test_allowed_routes():
         "/agentic/run",
         "/agentic/stream",
         "/agentic/health",
-        "/agentic/sessions",
-        "/agentic/sessions/{session_id}",
-        "/agentic/sessions/{session_id}/messages",
     }
     assert expected_paths.issubset(set(paths))
-    removed = {"/agentic/users", "/agentic/users/{user_id}", "/agentic/diseases", "/agentic/admin/overview",
+    removed = {"/agentic/sessions", "/agentic/sessions/{session_id}", "/agentic/sessions/{session_id}/messages",
+               "/agentic/users", "/agentic/users/{user_id}", "/agentic/diseases", "/agentic/admin/overview",
                "/agentic/grief-notes", "/agentic/grief-notes/moods", "/agentic/grief-notes/{note_date}"}
     assert not removed & set(paths)  # the extra APIs are gone
     assert set(paths["/agentic/run"]) == {"post"}
     assert set(paths["/agentic/stream"]) == {"post"}
-    assert set(paths["/agentic/sessions"]) == {"get"}
-    assert set(paths["/agentic/sessions/{session_id}"]) == {"delete"}
 
 
 @pytest.mark.parametrize("path", [
@@ -137,10 +133,28 @@ def test_allowed_routes():
     # the extra APIs (Swagger at /docs depends on SHOW_API_DOCS: see test_main_docs.py)
     "/agentic/users", "/agentic/users/usr_1", "/agentic/diseases", "/agentic/admin/overview",
     "/agentic/grief-notes", "/agentic/grief-notes/moods", "/agentic/grief-notes/2026-11-03",
+    # the session APIs (the app reads chats from Held's API) and their hidden duplicates
+    "/agentic/sessions", "/agentic/sessions/s1/messages", "/chat/sessions", "/chat/sessions/s1/messages",
 ])
 def test_removed_endpoints(api, path):
     client, _ = api
     assert client.get(path).status_code == 404
+
+
+def test_only_the_documented_routes_are_served():
+    """Every route the app serves, hidden ones included, is one of the documented endpoints."""
+    from fastapi.routing import APIRoute
+
+    served = {route.path for router in (app.router, agentic.router)
+              for route in router.routes if isinstance(route, APIRoute)}
+    documented = {"/", "/agentic/run", "/agentic/stream", "/agentic/health"}
+    assert served - {"/docs", "/openapi.json", "/docs/oauth2-redirect"} == documented
+
+
+def test_chats_cannot_be_deleted_through_this_api(api):
+    client, _ = api
+    for path in ("/agentic/sessions/s1", "/chat/sessions/s1"):
+        assert client.delete(path).status_code in (404, 405)
 
 
 def test_liveness_is_public_and_skips_the_database(api, monkeypatch):
@@ -329,17 +343,6 @@ def test_generation_rejects_users_not_in_user_table(api, auth, path):
     assert result.status_code == 401
     assert result.json()["detail"]["code"] == "USER_NOT_FOUND"
     assert provider.calls == []
-
-
-@pytest.mark.parametrize("path", [
-    "/agentic/sessions", "/agentic/sessions/private-session/messages",
-])
-def test_private_routes_still_require_auth(api, path):
-    client, _ = api
-    client.headers.pop("Authorization")
-    result = client.get(path)
-    assert result.status_code == 401
-    assert result.json()["detail"]["code"] == "TOKEN_MISSING"
 
 
 @pytest.mark.parametrize("payload", [
@@ -815,13 +818,13 @@ def counted(api, monkeypatch):
     return client
 
 
-def test_each_reply_carries_its_token_use(counted):
+def test_each_reply_carries_its_token_use(counted, fake_repo):
     data = counted.post("/agentic/run", json={"prompt": "I feel lonely."}).json()
     usage = data["usage"]
     assert (usage["input_tokens"], usage["output_tokens"], usage["thinking_tokens"], usage["total_tokens"]) == (1200, 150, 40, 1390)
     assert usage["request_count"] == 1 and usage["estimated_cost_usd"] > 0 and "calls" not in usage
 
-    messages = counted.get(f"/agentic/sessions/{data['session_id']}/messages").json()["messages"]
+    messages = fake_repo.messages[data["session_id"]]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert "usage" not in messages[0]["metadata"]  # tokens are spent on the reply
     assert messages[1]["metadata"]["usage"] == usage
@@ -835,8 +838,6 @@ def test_token_use_can_be_hidden_but_is_still_stored(counted, fake_repo, monkeyp
     monkeypatch.setattr(agentic.settings, "show_token_usage", False)
     data = counted.post("/agentic/run", json={"prompt": "I feel lonely."}).json()
     assert "usage" not in data
-    messages = counted.get(f"/agentic/sessions/{data['session_id']}/messages").json()["messages"]
-    assert "usage" not in messages[1]["metadata"]
     assert fake_repo.messages[data["session_id"]][1]["metadata"]["usage"]["total_tokens"] == 1390
 
 

@@ -29,9 +29,14 @@ def test_the_app_ids_are_plain_text():
     assert repository._key("") is None and repository._key(None) is None and repository._key("x" * 65) is None
 
 
-def test_deleting_a_chat_where_it_is_not_allowed_answers_403(monkeypatch, fake_repo, auth):
+def test_a_failed_new_chat_is_reported_even_where_it_cannot_be_deleted(monkeypatch, fake_repo, auth):
+    """A new chat whose first reply fails is deleted again; if the database refuses the delete,
+    the user still gets the error, not a crash."""
+    from backend.api.routers import agentic
+
     monkeypatch.setattr(repository, "delete_chat_session",
                         AsyncMock(side_effect=PermissionError("Chats cannot be deleted on this database.")))
+    monkeypatch.setattr(agentic.pipeline, "run", AsyncMock(side_effect=RuntimeError("AI down")))
     with TestClient(app, headers=auth("usr_1")) as client:
-        res = client.delete("/agentic/sessions/chat-1")
-    assert res.status_code == 403 and "cannot be deleted" in res.json()["detail"]
+        res = client.post("/agentic/run", json={"prompt": "Hello"})
+    assert res.status_code == 503
