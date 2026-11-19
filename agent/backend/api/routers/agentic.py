@@ -124,7 +124,7 @@ def _user_memory_job(user_id: str, previous: list[dict]):
 
 @router.get("/health", tags=["Health"], summary="Agent API & DB Health")
 async def health_check():
-    # Public: reports no row counts (see /agentic/admin/overview), and an unreachable
+    # Public: reports no row counts or user data, and an unreachable
     # database must not hold the request for the pool's 60 s connect timeout.
     try:
         async with asyncio.timeout(HEALTH_DB_TIMEOUT_SECONDS):

@@ -1,495 +1,205 @@
 # Held AI Agent API
 
-The Held AI Agent API provides multi-agent AI support and persists conversations in Held's shared PostgreSQL database.
+As of 2026-11-19.
 
----
+The Held AI Agent API answers chat messages with a four-agent Gemini pipeline and saves each conversation in the Held app's own PostgreSQL tables (`ChatSession`, `ChatMessage`).
 
 ## Base URLs
 
-- **Local Agent Server**: `http://127.0.0.1:8000`
-- **Production (Render)**: `https://held-ai-chatbot.onrender.com`
+| Environment | URL |
+| :--- | :--- |
+| Production (Render) | `https://held-ai.onrender.com` |
+| Local | `http://127.0.0.1:8000` (or the port you start it on) |
 
----
+Swagger is served at `/docs` only when `SHOW_API_DOCS=true`, for local testing. It is off on Render.
 
-## Summary of Endpoints
+## Endpoints
 
-> **RAG disabled:** the `/agentic/documents` endpoints and document search in chat are commented out in `agent/backend/main.py` and `agent/backend/api/routers/agentic.py`. Replies use the model's own DSM-5-TR knowledge, guided by the agent prompts, and no longer return `sources`. The code and the stored data remain, so restoring those lines brings RAG back.
-
-| Category | Method | Endpoint | Description |
+| Method | Endpoint | Purpose | Token |
 | :--- | :--- | :--- | :--- |
-| **Agent** | `POST` | `/agentic/stream` | Progressive Server-Sent Events (SSE) stream (with automatic session creation & details) |
-| **Agent** | `POST` | `/agentic/run` | Standard JSON response payload (with automatic session creation & details) |
-| **Health** | `GET` | `/` | Public liveness check; touches no database or Held API |
-| **Agent** | `GET` | `/agentic/health` | Public service & Held PostgreSQL health status |
-| **Sessions** | `GET` | `/agentic/sessions` | List the authenticated user's chat sessions (admins can list all) |
-| **Sessions** | `GET` | `/agentic/sessions/{id}/messages` | Retrieve chronological message history |
-| **Sessions** | `DELETE` | `/agentic/sessions/{id}` | Delete a chat session and all its messages |
-| **Users** | `GET` | `/agentic/users` | List registered users (read-only view) |
-| **Users** | `GET` | `/agentic/users/{id}` | Get user profile by ID (read-only view) |
-| **Users** | `POST` | `/agentic/users/register` | Add the signed-in Held user to the agent's database if missing; returns their row |
-| **Documents** | `POST` | `/agentic/documents` | Upload a `.txt`, `.md`, `.pdf` or `.docx` of any length (multipart field `file`, up to 50 MB); returns `202` and embeds the chunks in the background |
-| **Documents** | `GET` | `/agentic/documents` | List your documents |
-| **Documents** | `GET` | `/agentic/documents/{id}` | Status (`queued`/`processing`/`ready`/`failed`), progress, and a page of chunks (`chunk_offset`, `chunk_limit`) |
-| **Documents** | `DELETE` | `/agentic/documents/{id}` | Delete a document and its chunks |
-| **Documents** | `POST` | `/agentic/documents/search` | `{"query", "top_k", "document_ids"?}`: nearest passages by cosine similarity |
-| **Diseases** | `GET` | `/agentic/diseases` | The disease catalogue (`public."Disease"`, seeded from Held `GET /diseases` by `agent/scripts/seed_diseases.py`) |
-| **Grief notes** | `GET` | `/agentic/grief-notes/moods` | Mood catalogue (seeded from Held) |
-| **Grief notes** | `POST` | `/agentic/grief-notes/sync` | Store all of the user's Held notes |
-| **Grief notes** | `GET` | `/agentic/grief-notes` | List notes (`page`, `limit`, `from`, `to`) |
-| **Grief notes** | `POST` | `/agentic/grief-notes` | Write a note for a date (via Held) |
-| **Grief notes** | `GET` | `/agentic/grief-notes/{date}` | One note |
-| **Grief notes** | `PATCH` | `/agentic/grief-notes/{date}` | Edit the note's content and/or mood (via Held) |
-| **Admin** | `GET` | `/agentic/admin/overview` | Database summary entity counts |
+| `POST` | `/agentic/stream` | Send a message; the reply comes as server-sent events | Yes |
+| `POST` | `/agentic/run` | Send a message; the reply comes as JSON | Yes |
+| `GET` | `/agentic/sessions` | The user's chats | Yes |
+| `GET` | `/agentic/sessions/{id}/messages` | One chat and its messages | Yes |
+| `DELETE` | `/agentic/sessions/{id}` | Delete a chat and its messages | Yes |
+| `GET` | `/agentic/health` | Service and database check | No |
+| `GET` | `/` | Liveness check; touches no database | No |
 
-> **Configuration Note**: `DATABASE_URL` and `JWT_SECRET` are read from the local `.env` or the deployment environment. The agent writes to `chat_sessions`, `chat_messages`, `documents` and `document_chunks` (pgvector, migration 002), and adds `User` rows for Held users it has not seen before; it does not create tables (see `agent/migrations/001_user_and_chat_tables.sql`). If the Supabase direct host is unreachable (it is IPv6-only), set `DATABASE_POOLER_URL` to the IPv4 session pooler URL. Each reply sends the chat's latest 20 messages, plus its rolling summary once the chat is longer, and a short user memory (`public.user_memory`, migration 006) of the user's other chats. Summarisation fires once **10 messages** (user + assistant combined) have built up after the last summary, and runs in a background queue — the user is never delayed. The configured LAN database must be reachable from the machine running the agent.
+There are no other endpoints. User, disease, admin, document and grief-note endpoints were removed: grief notes are read by the agent's own tools during a chat (see [Grief notes in chat](#grief-notes-in-chat)).
 
 ## Authentication
 
-> **Test deployments**: with `AUTH_DISABLED=true`, no token is needed and any token sent is ignored. Every caller is one shared non-admin guest user, so callers see each other's chats and memory, and admin routes return `403`. See "Testing without a token" in the README. The rest of this section describes the default, with authentication on.
-
-`GET /` and `GET /agentic/health` are public. Session, user, and admin endpoints require the Held application's signed HS256 access token:
+Every endpoint except `/` and `/agentic/health` needs a Held access token:
 
 ```http
 Authorization: Bearer <held_access_token>
 ```
 
-The token's `sub` claim must be the `id` of a row in `public."User"` (see `agent/migrations/001_user_and_chat_tables.sql`); a Held user missing from that table is added from their Held profile (`GET /auth/me`) on first use, and only a token for an id Held does not know returns `401` with code `USER_NOT_FOUND`. Tokens signed with `JWT_SECRET` are verified locally; a token signed with another key is accepted only when Held confirms it through `GET /auth/me`. The user's stored `role` is normalized to `ADMIN`, `CAREGIVER`, or `SELF` (a missing role is `SELF`). `CAREGIVER` and `SELF` can access only sessions owned by their token subject; `ADMIN` can access all sessions. A `user_id` supplied in a request body is ignored for ownership. User listing/profile and database overview endpoints are admin-only.
+- **Verification:** a token signed with the server's `JWT_SECRET` is verified locally, with no call to Held. A token signed with another key is accepted only if Held confirms it through `GET {HELD_API_BASE_URL}/auth/me`; a confirmation is reused for 60 seconds.
+- **User:** the token's `sub` must be the `id` of a row in the Held `User` table. This service never creates users.
+- **Ownership:** a user sees only their own chats. A `user_id` sent in the body is ignored. A user whose `User.role` is `ADMIN` can open any chat.
+- **Expiry:** Held access tokens last 15 minutes. Get a new one from Held's login or refresh.
 
-`POST /agentic/run` and `POST /agentic/stream` **require** a valid token whose subject exists in `public."User"`; every turn is saved and remembered through [Context memory](#7-context-memory). A missing token returns `401 TOKEN_MISSING`, an invalid or expired one `401 TOKEN_INVALID` / `TOKEN_EXPIRED`, and a token for an id not in `User` returns `401 USER_NOT_FOUND`. The same token protects the session, user, and admin routes. `JWT_SECRET` is a server-only verification key; never send it in a request or use it as the bearer token.
+| Status | `detail.code` | Meaning |
+| :--- | :--- | :--- |
+| `401` | `TOKEN_MISSING` | No `Authorization: Bearer` header |
+| `401` | `TOKEN_INVALID` | Malformed, tampered, or not confirmed by Held |
+| `401` | `TOKEN_EXPIRED` | The token has expired |
+| `401` | `USER_NOT_FOUND` | The token's user is not in the `User` table |
+| `503` | (text) | The token could not be checked: `JWT_SECRET` does not match and Held could not be reached |
 
-For each generation request, the agent also fetches the caller's profile from the Held API (`GET /auth/me`) using the caller's own bearer token, so the server needs no Held credentials. The onboarding answers in it select one of four user modes (`myself_diagnosed`, `myself_undiagnosed`, `caregiver_diagnosed`, `caregiver_undiagnosed`), which are passed to clinical reasoning, response synthesis and the compliance review as `user_context`. If Held profile lookup fails, the agent logs a warning and continues without a user mode.
+## Sending a message
 
----
-
-## 1. `POST /agentic/stream` - Progressive SSE Stream
-
-Executes clinical intent classification, supervised planning, and clinical safety auditing, delivering the response in real-time sequential chunks via Server-Sent Events (`text/event-stream`).
-
-### Automatic Session Management
-This endpoint replaces standalone `POST /agentic/sessions` and `GET /agentic/sessions/{id}`:
-- **No `session_id` provided (New Session)**: A new session is created in `public.chat_sessions`, and both turns are appended to `public.chat_messages`.
-- **Existing `session_id` provided**: The session must belong to the token subject (unless the caller is an admin). Missing or inaccessible sessions return `404`.
-- **Pure Conversational Text for User**: Streamed text chunks (`{"text": "..."}`) contain **pure conversational response only**. Session IDs, debug indicators, and metadata are never mixed into the message text.
-- **Programmatic Session State**: The active `sessionId`, `session_id`, and complete `session` object are delivered in structured SSE JSON keys on the first event and final completion event for client state tracking.
-
-### Request Body
+`POST /agentic/run` and `POST /agentic/stream` take the same body.
 
 ```json
 {
   "prompt": "I feel overwhelmed and need help taking one small step.",
-  "session_id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
-  "title": "Overwhelm Reflection & Steps",
-  "metadata": {"source": "mobile_app"}
+  "session_id": "6f0c7c8e-1c2d-4c1e-9a55-0f6a1d2b3c4d"
 }
 ```
 
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `prompt` | `string` | **Yes** | 1 to 10,000 characters. |
-| `session_id` | `string` | Optional | Existing session ID to append to. **If omitted, a new session is automatically created.** |
-| `user_id` | `string` | Optional | Ignored; ownership is taken from the signed token subject. |
-| `title` | `string` | Optional | Ignored; the AI names each new session itself. |
-| `metadata` | `object` | Optional | Custom JSON metadata dictionary to store on the session (the `memory` key is reserved). |
-| `session` | `object` | Optional | Alternative nested session object containing `id`, `user_id`, `title`, `metadata`. |
+| `prompt` | string | Yes | 1 to 10,000 characters, trimmed |
+| `session_id` | string | No | The chat to continue. Leave it out to start a new chat |
+| `isNote` | boolean | No | Default `false`. `true` when `prompt` is a grief note the user wrote in the app (see below) |
+| `metadata` | object | No | Custom data stored on a new chat. The `memory` key is reserved and dropped |
+| `title` | string | No | Ignored: the AI names each new chat |
+| `user_id` | string | No | Ignored: the user comes from the token |
+| `session`, `session_data` | object | No | Older nested form; `id` and `metadata` inside are read as above |
 
-### How to Use
+Any other field is rejected with `422`. A `422` says which field is wrong and why, but never repeats what was sent, because a prompt can hold a sensitive disclosure.
 
-#### cURL
-```bash
-# New session (session_id omitted - auto-created in database)
-curl -N -X POST "https://held-ai-chatbot.onrender.com/agentic/stream" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  -d '{"prompt": "I feel overwhelmed and need help taking one small step."}'
-```
-> **Note:** The `-N` flag disables cURL's internal buffering to display chunks immediately.
+### A grief note sent from the app (`isNote`)
 
-#### JavaScript (`fetch` / Browser)
-```javascript
-let currentSessionId = null; // Store across turns
+With `"isNote": true` the agent replies to the note as a grief companion.
 
-async function chat(prompt) {
-  const payload = { prompt };
-  if (currentSessionId) {
-    payload.session_id = currentSessionId;
-  }
+- Each note starts its own new chat; a `session_id` is ignored.
+- The chat and the note's message are marked `"isNote": true` in their `metadata`.
+- Crisis language in the note still gets a crisis reply.
+- Follow-up messages in that chat are sent without `isNote`, with the chat's `session_id`.
+- The note's mood reaches the agent only if the app writes it into `prompt`, for example `Mood: Sad`.
 
-  const response = await fetch("https://held-ai-chatbot.onrender.com/agentic/stream", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream",
-    },
-    body: JSON.stringify(payload),
-  });
+### `POST /agentic/run`
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-
-      const data = JSON.parse(trimmed.slice(5).trim());
-
-      // Capture session ID automatically for next turns
-      if (data.sessionId && !currentSessionId) {
-        currentSessionId = data.sessionId;
-      }
-
-      // Display pure conversational text to the user
-      if (data.text) {
-        document.getElementById("chat-box").innerText += data.text;
-      }
-
-      // Stream completed
-      if (data.done) {
-        console.log("Chat turn complete. Session ID:", currentSessionId);
-      }
-    }
-  }
-}
-```
-
-#### Stream Event Payloads
-
-```text
-data: {"sessionId": "session-text-id", "session_id": "session-text-id", "session": {"id": "session-text-id", "user_id": "held-user-id-from-token", "title": "I feel overwhelmed...", "status": "ACTIVE", "metadata": null, "created_at": "...", "updated_at": "..."}}
-
-data: {"text": "It is completely understandable "}
-
-data: {"text": "to feel that way. Let us focus "}
-
-data: {"text": "on just one small, manageable step right now."}
-
-data: {"done": true, "sessionId": "22006c3e-dc6f-4862-9503-5d408ddc6c97", "session_id": "22006c3e-dc6f-4862-9503-5d408ddc6c97", "session": {"id": "22006c3e-dc6f-4862-9503-5d408ddc6c97", ...}}
-```
-
----
-
-## 2. `POST /agentic/run` - Standard JSON
-
-Executes the pipeline and returns the complete, audited response along with the active `session_id` and complete `session` entity.
-
-### Automatic Session Management
-- **No `session_id` provided**: Automatically creates a session in `chat_sessions`, saves both turns in `chat_messages`, and returns the active `session_id`.
-- **`session_id` provided**: Appends user message and assistant reply to the existing session thread.
-- **Pure Conversational Text**: The `response` field contains purely the clean agent message.
-
-### Request Body
 ```json
 {
-  "prompt": "Can you give me 3 brief tips for caregiver burnout?",
-  "session_id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
-  "title": "Caregiver Burnout Tips",
-  "metadata": {"source": "mobile_app"}
-}
-```
-
-| Field | Type | Required | Description |
-| :--- | :--- | :--- | :--- |
-| `prompt` | `string` | **Yes** | 1 to 10,000 characters. |
-| `session_id` | `string` | Optional | Existing session ID to append to. **If omitted, a new session is automatically created.** |
-| `user_id` | `string` | Optional | Ignored; ownership is taken from the signed token subject. |
-| `title` | `string` | Optional | Ignored; the AI names each new session itself. |
-| `metadata` | `object` | Optional | Custom JSON metadata dictionary to store on the session (the `memory` key is reserved). |
-| `session` | `object` | Optional | Alternative nested session object containing `id`, `user_id`, `title`, `metadata`. |
-
-### Python Example
-```python
-import requests
-
-response = requests.post(
-    "https://held-ai-chatbot.onrender.com/agentic/run",
-    headers={"Authorization": f"Bearer {held_access_token}"},
-    json={"prompt": "Can you give me 3 brief tips for caregiver burnout?"}
-)
-data = response.json()
-
-# Pure assistant response text:
-print(data["response"])
-
-# Programmatic session tracking:
-print("Session ID:", data["session_id"])
-print("Session Details:", data["session"])
-```
-
-### Response (`200 OK`)
-```json
-{
-  "response": "1. Schedule micro-breaks throughout the day...\n2. Set clear emotional boundaries...\n3. Connect with caregiver support groups...",
-  "session_id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
+  "response": "A week like that leaves very little room to breathe...",
+  "session_id": "6f0c7c8e-1c2d-4c1e-9a55-0f6a1d2b3c4d",
   "session": {
-    "id": "session-text-id",
-    "user_id": "held-user-id-from-token",
-    "title": "Caregiver Burnout Tips",
-    "status": "active",
-    "metadata": {
-      "source": "mobile_app"
-    },
+    "id": "6f0c7c8e-1c2d-4c1e-9a55-0f6a1d2b3c4d",
+    "user_id": "usr_...",
+    "title": "Stressful week at work",
+    "status": "ACTIVE",
+    "metadata": {},
     "session_summary": null,
     "last_summarized_message_id": null,
     "total_message_count": 2,
-    "created_at": "2026-10-01T12:00:00Z",
-    "updated_at": "2026-10-01T12:05:00Z"
+    "created_at": "2026-11-19T10:00:00.123000+00:00",
+    "updated_at": "2026-11-19T10:00:05.456000+00:00"
   }
 }
 ```
 
-> **`session_summary`** is `null` until the 10-message threshold is first crossed, after which it holds a compact rolling summary of the conversation produced in the background.
+Times are UTC, in ISO 8601 with a `+00:00` offset. The reply is Markdown: short paragraphs, `**bold**` questions and labels, `-` bullets and `1.` steps. When `SHOW_TOKEN_USAGE=true` the response also has `usage` (the reply's token counts and estimated cost); it is off by default.
 
----
+### `POST /agentic/stream`
 
-## 3. Chat Session Management Endpoints
+The reply is reviewed in full before any text is sent, then streamed in small parts as `text/event-stream`. Each event is one `data:` line of JSON.
 
-> **Integrated Session Lifecycle**: Standalone `POST /agentic/sessions` (create session) and `GET /agentic/sessions/{id}` (get session details) have been deprecated and return `405 Method Not Allowed`. When chatting, send your request to `/agentic/stream` or `/agentic/run`; if `session_id` is omitted, a new session is created automatically.
+```text
+data: {"sessionId": "6f0c...", "session_id": "6f0c...", "session": {...}}
 
-### 3.1 List Sessions: `GET /agentic/sessions`
-Returns the caller's sessions ordered by `updatedAt DESC`. Admins receive all sessions. There is no caller-selected user filter.
+data: {"text": "A week like that leaves "}
 
-```bash
-# Get all sessions
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/sessions" -H "Authorization: Bearer $HELD_ACCESS_TOKEN"
+data: {"text": "very little room to breathe..."}
 
-# Filter by user ID
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/sessions" -H "Authorization: Bearer $HELD_ADMIN_ACCESS_TOKEN"
+data: {"done": true, "sessionId": "6f0c...", "session_id": "6f0c...", "session": {...}}
 ```
 
-#### Response (`200 OK`)
-```json
-[
-  {
-    "id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
-    "user_id": "usr_fc24612762006896",
-    "title": "I am dealing with a recent loss and need guidance",
-    "status": "active",
-    "metadata": {},
-    "session_summary": "The user is grieving a recent loss and seeks emotional support and practical coping strategies.",
-    "last_summarized_message_id": "8c1e2f0a-5b7d-4c9e-a1f3-2d6b9e0c4a71",
-    "total_message_count": 14,
-    "message_count": 14,
-    "last_message_at": "2026-10-01T12:32:47.414000Z",
-    "created_at": "2026-10-01T11:44:24.194000Z",
-    "updated_at": "2026-10-01T12:32:47.414000Z"
-  }
-]
+1. **First event:** the chat's ID, before any text. For a new chat the title is a placeholder.
+2. **`text` events:** the reply, in order. Join them to get the full text.
+3. **`done` event:** the chat with its AI-written title (and `usage` when `SHOW_TOKEN_USAGE=true`).
+
+**Error event.** When no reply can be written, for example during a Gemini rate limit or outage, there are no `text` events. One error event is sent instead and the stream ends:
+
+```text
+data: {"detail": "The AI is getting too many requests right now. Please try again in about 39 seconds.", "status": 429, "retry_after": 39, "session_discarded": true}
 ```
 
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| `session_summary` | `string \| null` | Compact rolling summary produced by the background summariser. `null` until the first 10-message threshold is crossed. |
-| `total_message_count` | `int` | Total number of messages (user + assistant) saved in this session. |
-| `last_summarized_message_id` | `uuid \| null` | Last message folded into `session_summary`. The next summary fires once 10 newer messages exist. |
+| Field | Meaning |
+| :--- | :--- |
+| `status` | `429` rate limit, `503` AI unavailable, `504` timed out |
+| `detail` | A message that can be shown to the user |
+| `retry_after` | Seconds to wait, on a rate limit |
+| `session_discarded` | `true` when the new chat was not kept; retry without `session_id` |
 
-### 3.2 Get Session Conversation History: `GET /agentic/sessions/{id}/messages`
-Retrieves all turns (both user prompts and assistant replies) in chronological order.
+The app should treat any event with `status` as an error: show `detail`, offer Retry, and keep the user's text. A message that may show risk (thoughts of dying, self-harm, an overdose) never gets this event: when the AI is unavailable it gets a fixed crisis reply with 988 and 911 instead.
 
-```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/sessions/22006c3e-dc6f-4862-9503-5d408ddc6c97/messages" -H "Authorization: Bearer $HELD_ACCESS_TOKEN"
-```
+## Chats
 
-#### Response (`200 OK`)
+### `GET /agentic/sessions`
+
+The user's chats, most recently updated first (an admin gets everyone's). Returns a list of chat objects, as in `session` above, plus `message_count` and `last_message_at` (the newest message's time).
+
+### `GET /agentic/sessions/{id}/messages`
+
 ```json
 {
-  "session": {
-    "id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
-    "title": "I am dealing with a recent loss and need guidance"
-  },
+  "session": { "id": "6f0c...", "title": "Stressful week at work", "...": "..." },
   "messages": [
-    {
-      "id": "11111111-1111-1111-1111-111111111111",
-      "session_id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
-      "role": "user",
-      "content": "I am dealing with a recent loss and need a moment to reflect.",
-      "created_at": "2026-10-01T11:45:00Z"
-    },
-    {
-      "id": "22222222-2222-2222-2222-222222222222",
-      "session_id": "22006c3e-dc6f-4862-9503-5d408ddc6c97",
-      "role": "assistant",
-      "content": "I hear how heavy and tender your heart must be right now...",
-      "created_at": "2026-10-01T11:45:05Z"
-    }
+    { "id": "...", "session_id": "6f0c...", "role": "user", "content": "I've had a really stressful week at work.", "metadata": {}, "created_at": "..." },
+    { "id": "...", "session_id": "6f0c...", "role": "assistant", "content": "A week like that...", "metadata": {}, "created_at": "..." }
   ]
 }
 ```
 
-### 3.3 Delete Session: `DELETE /agentic/sessions/{id}`
-Deletes the conversation session. Thanks to database foreign key cascading (`ON DELETE CASCADE`), all associated messages are also deleted.
+Messages are oldest first. A message from a grief note has `"isNote": true` in its `metadata`. A reply's `metadata.usage` holds its token use, shown only when `SHOW_TOKEN_USAGE=true`. A chat that is not the user's returns `404`.
 
-```bash
-curl -X DELETE "https://held-ai-chatbot.onrender.com/agentic/sessions/1baa9da8-c663-4cb1-ad7f-3d37ef0b56b5" -H "Authorization: Bearer $HELD_ACCESS_TOKEN"
-```
+### `DELETE /agentic/sessions/{id}`
 
-#### Response (`200 OK`)
-```json
-{
-  "success": true
-}
-```
+Deletes the chat; the database cascade deletes its messages. Returns `{"success": true}`. A chat that is not the user's returns `404`. If the database user has no delete right, the answer is `403`.
 
----
+## Health
 
-## 4. Health & Database Overview Endpoints
-
-### 4.1 Liveness Check: `GET /`
-Public. Confirms the API process is running; it does not check the database or the Held API.
-
-```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/"
-```
-
-#### Response (`200 OK`)
-```json
-{
-  "status": "ok",
-  "app_name": "Held AI Agent API"
-}
-```
-
-### 4.2 Health Check: `GET /agentic/health`
-Public. Checks FastAPI service and Held PostgreSQL connection status. The database gets 5 seconds to answer. The response is always `200 OK`: when the database is unreachable, `status` is `degraded` and `connected` is `false`.
-
-```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/health"
-```
-
-#### Response (`200 OK`)
-```json
-{
-  "status": "ok",
-  "app_name": "Held AI Agent API",
-  "database": {
-    "connected": true
-  }
-}
-```
-
-### 4.3 Database Entity Overview: `GET /agentic/admin/overview`
-Returns read-only counts for `User`, `chat_sessions`, and `chat_messages`.
-
-```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/admin/overview" -H "Authorization: Bearer $HELD_ADMIN_ACCESS_TOKEN"
-```
-
----
-
-## 5. User & Disease Endpoints (Read-Only)
-
-> **Access Policy**: The Agent API has read-only access to `User` and `GriefNote`; it writes to neither table. The connected database does not contain a `Disease` table. User endpoints require an admin token.
-
-### 5.1 List Users: `GET /agentic/users`
-Retrieves registered user profiles from `public."User"`.
-
-```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/users" -H "Authorization: Bearer $HELD_ADMIN_ACCESS_TOKEN"
-```
-
-#### Response (`200 OK`)
-```json
-[
-  {
-    "id": "usr_fc24612762006896",
-    "email": "eleanor@example.com",
-    "fullName": "Eleanor Vance",
-    "username": "eleanor_vance",
-    "role": "USER",
-    "relation": "SELF",
-    "createdAt": "2026-10-01T12:00:00Z"
-  }
-]
-```
-
-### 5.2 Get User Profile: `GET /agentic/users/{id}`
-Retrieves a single user's profile details.
-
-```bash
-curl -X GET "https://held-ai-chatbot.onrender.com/agentic/users/usr_fc24612762006896" -H "Authorization: Bearer $HELD_ADMIN_ACCESS_TOKEN"
-```
-
-### 5.3 Diseases
-Unavailable in this database: there is no `Disease` table, so this endpoint returns `404`.
-
-```bash
-```
-
----
-
-## 6. Error Handling
-
-Standard HTTP status codes are returned for error conditions:
-
-| Code | Name | Description |
-| :--- | :--- | :--- |
-| `400` | Bad Request | Missing required parameters or invalid syntax. |
-| `404` | Not Found | Session or resource ID does not exist in the database. |
-| `405` | Method Not Allowed | Standalone session creation or details requested (use `/stream` or `/run` instead). |
-| `422` | Unprocessable Entity | Validation failed (e.g. empty prompt or prompt exceeding 10,000 chars). |
-| `503` | Service Unavailable | Downstream AI provider or database unreachable. |
-| `504` | Gateway Timeout | Processing exceeded timeout limit. |
-
----
-
-## 7. Context memory & Summarisation
-
-`/agentic/run` and `/agentic/stream` remember earlier turns of a conversation; there are no separate conversation routes.
-
-### How memory is loaded
-
-- **Requires** a valid token for a user in `public."User"`; send the `session_id` returned by the first turn to continue a conversation. Ownership comes from the token; a `user_id` in the body is never used.
-- **Before generation (existing conversation)**: one query confirms the session belongs to the caller (admins excepted) and loads its latest 20 `chat_messages` rows in order, together with the user memory (`user_memory.summary`). The agents receive these as context — not as instructions:
-  - the latest 20 messages verbatim (a message over 4,000 characters keeps its first and last 2,000);
-  - `chat_sessions.session_summary`, once the conversation has more than 20 messages;
-  - `earlier_conversations`: the user memory, a short summary of the user's other recent conversations.
-- **Before generation (new conversation)**: short recaps (summary + the user's last 6 messages) of the user's 10 most recent other conversations are loaded as `previous_conversations`, so the agent remembers the user across chats. After the reply, a background job condenses these recaps into the user memory (at most 150 words, with no mention of suicide, self-harm or thoughts of dying) for the conversation's later replies.
-- **Per agent**: Agent 1 (routing) gets the summary, the user's own messages among the latest 20 and the last 6 messages in full, Agent 2 the summary and the last 10, Agent 3 everything, and Agent 4 everything except the assistant's own earlier replies. Agents 1 and 2 never see other conversations.
-
-### 10-message threshold summarisation
-
-Summarisation is **anchor-based**: it counts messages stored after `last_summarized_message_id`, and runs entirely in the background.
-
-| Step | What happens |
+| Endpoint | Response |
 | :--- | :--- |
-| Each turn saved | One statement inserts the user message and the assistant reply into `chat_messages`, adds 2 to `total_message_count` and, for a new conversation, sets the AI-generated title. |
-| After each turn | The turn already holds the latest messages, so it counts those after `last_summarized_message_id` without a database read. Only when 10 or more are waiting is a summarisation job placed on an in-process `asyncio.Queue`. The user response has already been sent — they are never blocked. |
-| Consumer (idle) | A background worker re-reads only the session row, in case another job summarised meanwhile, and reads messages only if the summary has fallen behind the ones the turn held. |
-| ≥ 10 new messages | An LLM call merges them into the previous summary (≤ 250 words, in labelled parts: Facts, Feelings and goals, Already suggested). The result is written to `chat_sessions.session_summary` and `last_summarized_message_id` is set to the newest summarised message. |
-| Threshold not met | No job is queued; no database read or write. |
+| `GET /` | `{"status": "ok", "app_name": "Held AI Agent API"}` |
+| `GET /agentic/health` | `{"status": "ok", "app_name": "...", "database": {"connected": true}}`. Always `200`; when the database does not answer within 5 seconds, `status` is `degraded` and `connected` is `false` |
 
-```
-Example timeline (messages = user + assistant counted together):
+## Errors
 
-  msg #1–#2   (turn 1): 2 messages after anchor  < 10 → skip
-  msg #3–#4   (turn 2): 4 messages after anchor  < 10 → skip
-  ...
-  msg #9–#10  (turn 5): 10 messages after anchor ≥ 10 → SUMMARISE, anchor = msg #10
-  msg #11–#12 (turn 6): 2 messages after anchor  < 10 → skip
-  ...
-  msg #19–#20 (turn 10): 10 messages after anchor ≥ 10 → SUMMARISE, anchor = msg #20
-```
-
-### Where each value is stored
-
-| Data | Column |
+| Code | When |
 | :--- | :--- |
-| Conversation owner | `chat_sessions.user_id` (→ `User.id`) |
-| AI-generated title | `chat_sessions.title` |
-| Rolling summary | `chat_sessions.session_summary` |
-| Summary anchor | `chat_sessions.last_summarized_message_id` |
-| Message count | `chat_sessions.total_message_count` |
-| Client-supplied metadata | `chat_sessions.metadata` (nothing server-owned is stored here) |
-| Each prompt / answer | `chat_messages.role`, `content`, `created_at` |
-| User memory (other conversations) | `user_memory.summary`, one row per user |
+| `401` | Token missing, invalid or expired, or the user is not in `User` (see [Authentication](#authentication)) |
+| `403` | Deleting a chat when the database user may not delete |
+| `404` | The chat does not exist or is not the user's |
+| `422` | Invalid body: empty or over 10,000 characters, or an unknown field. The sent values are not echoed |
+| `429` | Gemini rate limit; the `Retry-After` header gives the wait (on the stream: the error event) |
+| `503` | The AI or the database is unavailable, or the token could not be checked |
+| `504` | The reply took longer than the time limit (240 seconds) |
 
-### Session title
+## Grief notes in chat
 
-The AI names every new session after its first answer (3–6 words; the prompt excerpt is used if naming fails). In `/stream` the first event carries a placeholder title and the final `done` event delivers the AI-generated title.
+The writer agent can read the user's own grief notes during a chat, with three read-only tools: `recent_notes`, `note_by_date` and `mood_summary`. They are bound to the token's user and take no user ID, so no one can read another user's notes. The app does not call them; the agent decides when a question needs the notes, for example "how has my last month been?".
+
+## Memory
+
+- **Within a chat:** the latest 20 messages, plus a rolling summary of older ones, updated in the background every 10 messages.
+- **New chat:** starts fresh. Earlier chats are searched only when the user refers back to one ("last time I told you about my manager").
+- **Everything comes from the token's user.** One user's chats and memory never reach another user.
+
+More detail: [context.md](./context.md). Tables: [scheme.md](./scheme.md).
+
+## Server settings
+
+| Setting | Use |
+| :--- | :--- |
+| `DATABASE_URL` | The Held PostgreSQL database |
+| `GEMINI_API_KEY` | Gemini key; use a paid key in production |
+| `JWT_SECRET` | The key Held signs access tokens with |
+| `HELD_API_BASE_URL` | Held API, to confirm a token signed with another key and as the profile fallback. Can be empty when `JWT_SECRET` is set |
+| `SUPPORT_COUNTRY` | Country of the crisis lines replies give. Default `US` |
+| `SHOW_TOKEN_USAGE` | `true` shows token use to the app. Default `false` |
+| `SHOW_API_DOCS` | `true` serves Swagger at `/docs`. Default `false` |

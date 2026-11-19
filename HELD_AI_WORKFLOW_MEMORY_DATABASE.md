@@ -1,48 +1,47 @@
 # Held AI: Workflow, Memory and Database
 
-As of 2026-11-04.
-
-> **Status:** this week's changes are only on the local PC. They are not committed, so Render still runs the older version, where RAG is on, the Supervisor still runs and memory sends the whole chat. Migration 006 (the `user_memory` table) is already applied to Supabase; the old version ignores it.
+As of 2026-11-19. This repository (`Held-AI`, deployed on Render) and the private `held-ai-supabase` repository now hold the same code.
 
 ## 1. Complete workflow
 
 `/agentic/run` and `/agentic/stream` follow the same steps for every message.
 
-1. **Login check.** The token is verified with `JWT_SECRET`, or by asking Held (`/auth/me`). A Held user who isn't in the database yet is added to `User`. With `AUTH_DISABLED=true`, as on Render now, everyone uses one shared guest account.
-2. **Chat session.** For an existing chat, one database read loads the session, its latest 20 messages and the user memory. A new chat is created, and recaps of the user's 10 most recent other chats are read.
-3. **Context.** It builds memory, gets the user's Held profile to set their mode, and adds grief notes if the message mentions a journal or notes.
-4. **Safety and routing.** An instant crisis check runs first, with no AI. Then Agent 1 picks one of 5 routes in a single call: off-topic, general support, clinical, grief or crisis.
-5. **Reasoning.** Agent 2 runs only for clinical and grief messages. Clinical uses its DSM-5-TR knowledge, and grief uses a companioning approach.
-6. **Writing.** Agent 3 writes the reply.
-7. **Code checks.** The opening line and repeated safety questions are checked, and a bad draft gets one rewrite.
-8. **Review.** Agent 4 does a light safety review. If the draft fails twice, the user gets a fixed safe message.
-9. **Saving.** One database write stores the user's message, the reply, the message count and, for a new chat, its AI-written title. The token use is logged.
-10. **Background.** Every 10 messages the chat summary is updated. When a new chat starts, the user memory is rebuilt. The user never waits for either.
-11. **Response.** `/agentic/run` returns JSON. `/agentic/stream` sends the session ID first, then the reviewed reply in small parts.
+1. **Sign-in check.** The Held token is verified with `JWT_SECRET`, or confirmed by Held's `GET /auth/me`. The token's user must exist in `User`; this service never adds users.
+2. **Chat.** For an existing chat, one read loads the chat, its latest 20 messages, the user memory and the kept profile. A new chat is created; a grief note sent with `isNote: true` always starts one.
+3. **Profile.** The user's role, relation and conditions are read once per chat by the profile tool (`User`, `UserDisease`, `Disease`) and kept with the chat. They pick one of four reply modes.
+4. **Instant crisis check.** Fixed word patterns, with no AI, in English, Spanish and Roman Urdu.
+5. **Agent 1, routing.** One call picks one of five routes: crisis, grief, clinical, general support or off-topic. It also notices when the user refers back to an earlier chat.
+6. **Off-topic.** A message outside mental health, wellbeing, caregiving and grief gets a short fixed reply from code, and no other agent runs. Never in a chat where the user's own risk came up.
+7. **Agent 2, reasoning.** Only for clinical and grief messages.
+8. **Agent 3, writing.** Writes the reply. It may call the grief note tools when the answer depends on the user's notes.
+9. **Code checks.** An echoing or stock opening, a repeated safety check-in, or a safety question already answered gets one rewrite.
+10. **Agent 4, review.** A light safety review. After two failed drafts the user gets a fixed safe message.
+11. **Crisis line.** The first crisis reply of a chat always carries a verified crisis line; code adds it when the reply did not.
+12. **Saving.** One write stores the message, the reply (with its token use) and, for a new chat, the AI-written title.
+13. **Background.** Every 10 messages the chat summary is updated, and a new chat rebuilds the user memory. The user never waits.
+14. **Response.** `/agentic/run` returns JSON. `/agentic/stream` sends the chat ID first, then the reviewed reply in small parts.
 
-| Setting            | Value                                                |
-| ------------------ | ---------------------------------------------------- |
-| AI model           | `gemini-3.5-flash-lite` for every agent              |
-| Thinking level     | Low for Agents 1, 2 and 4; medium for Agent 3        |
-| Document RAG       | Commented out locally                                |
-| Reply length limit | 8,192 tokens per AI call, thinking included          |
-| Retries            | Up to 3 tries after a passing failure or empty reply |
+When Gemini cannot answer (a rate limit or an outage), a message that may show risk gets a fixed crisis reply with 988 and 911; other messages get an error (`429`, `503`, `504`).
 
-### Other endpoints
+| Setting | Value |
+| :--- | :--- |
+| AI model | `gemini-3.5-flash-lite` for every agent |
+| Thinking level | Low for Agents 1, 2 and 4; medium for Agent 3 |
+| Reply length limit | 8,192 tokens per AI call, thinking included |
+| Retries | Up to 3 tries after a passing failure (5xx, timeout, empty reply); a rate limit with a wait of 10 seconds or less is waited out once |
+| Time limit | 240 seconds per message |
 
-| Endpoint                              | Purpose                              |
-| ------------------------------------- | ------------------------------------ |
-| `GET /`                               | Public check that the app is up      |
-| `GET /agentic/health`                 | Public check of the app and database |
-| `GET /agentic/sessions`               | List chats                           |
-| `GET /agentic/sessions/{id}/messages` | Read one chat                        |
-| `DELETE /agentic/sessions/{id}`       | Delete one chat                      |
-| `POST /agentic/users/register`        | Add the signed-in Held user          |
-| `GET /agentic/users`                  | List users (admin only)              |
-| `GET /agentic/users/{id}`             | Get one user (admin only)            |
-| `GET /agentic/admin/overview`         | Row counts (admin only)              |
-| `GET /agentic/diseases`               | Condition list                       |
-| `/agentic/grief-notes/...`            | Grief notes and moods                |
+### Endpoints
+
+| Endpoint | Purpose |
+| :--- | :--- |
+| `POST /agentic/run`, `POST /agentic/stream` | Send a message |
+| `GET /agentic/sessions` | The user's chats |
+| `GET /agentic/sessions/{id}/messages` | One chat |
+| `DELETE /agentic/sessions/{id}` | Delete one chat |
+| `GET /`, `GET /agentic/health` | Public checks |
+
+Full reference: [document/api.md](./document/api.md).
 
 Code: `agent/backend/ai_wrapper/orchestrator.py`, `agent/backend/api/routers/agentic.py`
 
@@ -51,101 +50,82 @@ Code: `agent/backend/ai_wrapper/orchestrator.py`, `agent/backend/api/routers/age
 Memory is rebuilt from the database for every message, from at most one read.
 
 - **Current chat:** the latest 20 messages word for word. A message over 4,000 characters keeps its first and last 2,000.
-- **Long chat:** once a chat has more than 20 messages, a summary of up to 250 words is added, in labelled parts: facts, feelings and goals, and the advice the bot already gave. It updates in the background every 10 messages and is saved on the session.
-- **Other chats, first reply of a new chat:** the 10 most recent, with title, summary and the user's last 6 messages (600 characters each). The bot's own replies are left out.
-- **Other chats, later replies:** the user memory, a summary of up to 150 words of those same recaps, stored in `user_memory`. It is rebuilt in the background each time a new chat starts.
-- **Safety concerns:** risk messages from other chats, up to 3 per chat, used only if under 6 days old and only for the first reply of a new chat. Otherwise they're removed from memory, including matching sentences in summaries. The user memory never mentions suicide, self-harm or thoughts of dying.
-- **Grief notes:** the 10 newest notes, 1,000 characters each, only when the message mentions notes, a journal, diary or workbook.
+- **Long chat:** once a chat has more than 20 messages, a summary of up to 250 words is added, in labelled parts: facts, feelings and goals, advice already given, and safety answers. It updates in the background every 10 messages.
+- **New chat:** starts fresh. It gets no recaps of earlier chats, only the user memory as silent background (up to 150 words, never mentioning suicide, self-harm or thoughts of dying).
+- **Recall:** when the user refers back to an earlier chat, a full-text search over both sides of their chats from the last 365 days gives the writer the top 5 excerpts, with safety talk removed.
+- **Safety check-in:** a safety concern from a chat in the last 6 days is checked on once per account, in the first reply of a new chat, only when the user talks about how they feel and never in a reply about a new loss.
 
-| Agent              | Memory it gets                                             |
-| ------------------ | ---------------------------------------------------------- |
-| Agent 1, routing   | Summary, user's messages in the latest 20, last 6 messages |
-| Agent 2, reasoning | Chat summary and the last 10 messages of this chat         |
-| Agent 3, writing   | Everything above                                           |
-| Agent 4, review    | Everything except the bot's own earlier replies            |
+| Agent | Memory it gets |
+| :--- | :--- |
+| Agent 1, routing | Summary, the user's messages among the latest 20, the last 6 messages in full |
+| Agent 2, reasoning | Summary and the last 10 messages |
+| Agent 3, writing | Everything above, plus the user memory and recalled excerpts |
+| Agent 4, review | Everything except the agent's own earlier replies |
 
-- **Other chats stay out of routing:** Agents 1 and 2 never see them, so an old chat can't turn a new message into a crisis.
-- **Past hardships:** the bot mentions a past loss or diagnosis only if the user's latest message raises it.
-- **Repeat guard:** code stops the safety question from being asked twice in one chat. In a long chat, the summary records that it was asked.
-- **No repeated advice:** Agent 3 treats the summary's "Already suggested" list as advice already given.
-- **Crisis detection:** still runs on every message, so new risk is always caught.
-- **Shared memory on Render:** while guest mode is on, all testers share one memory.
+- **Other chats stay out of routing:** Agents 1 and 2 never see them.
+- **Memory is referred to tentatively**, and only when the latest message is about the same thing.
+- **A memory list leaves out** abuse, suicidal thoughts and self-harm.
+- **Crisis detection** still runs on every message, so new risk is always caught.
 
-Code: `agent/backend/ai_wrapper/memory.py`
+More: [document/context.md](./document/context.md). Code: `agent/backend/ai_wrapper/memory.py`
 
 ## 3. Tables in the database
 
-The app has 9 tables, all in the `public` schema, all created by the project's migrations in `agent/migrations/`.
+The Held app's own tables (Prisma), in the `public` schema. The agent creates none.
 
-| Table             | Rows now | Added by | Holds                                  |
-| ----------------- | -------- | -------- | -------------------------------------- |
-| `User`            | 6        | 001      | Users copied from Held, plus the guest |
-| `chat_sessions`   | 65       | 001      | One row per chat, with its summary     |
-| `chat_messages`   | 282      | 001      | Every message and reply                |
-| `documents`       | 1        | 002      | The DSM-5-TR upload record             |
-| `document_chunks` | 6,988    | 002      | Book chunks with embeddings            |
-| `Disease`         | 21       | 003      | Condition list from Held               |
-| `Mood`            | 20       | 005      | Mood list from Held                    |
-| `grief_notes`     | 5        | 005      | Copies of grief notes                  |
-| `user_memory`     | 0        | 006      | One short memory per user              |
+| Table | Access | Holds |
+| :--- | :--- | :--- |
+| `ChatSession` | Read and write | One row per chat: title, summary, message count, metadata |
+| `ChatMessage` | Read and write | Every message and reply |
+| `User` | Read | The signed-in users; role and relation |
+| `UserDisease`, `Disease` | Read | The conditions chosen at onboarding |
+| `GriefNote` | Read | The user's grief notes |
+| `Mood` | Read | Mood titles |
 
-**New tables:** 6 were added on top of the original 3 (`User`, `chat_sessions`, `chat_messages`): `documents`, `document_chunks`, `Disease`, `Mood`, `grief_notes` and `user_memory`. Migration 004 only added columns to `documents`.
+Links: `ChatSession.userId` → `User` and `ChatMessage.sessionId` → `ChatSession`, both `ON DELETE CASCADE`.
 
-**Links between tables:**
-
-| From                          | To              |
-| ----------------------------- | --------------- |
-| `chat_sessions.user_id`       | `User`          |
-| `chat_messages.session_id`    | `chat_sessions` |
-| `documents.user_id`           | `User`          |
-| `document_chunks.document_id` | `documents`     |
-| `grief_notes.user_id`         | `User`          |
-| `user_memory.user_id`         | `User`          |
-
-**Other database items:** 4 enum types (`AuthProvider`, `OAuthProvider`, `RelationType`, `UserRole`) and the `vector` extension, version 0.8.2, for embeddings.
+Columns and metadata keys: [document/scheme.md](./document/scheme.md).
 
 ## 4. How data is stored
 
-- **Chats:** a new chat creates a `chat_sessions` row. Each turn adds 2 `chat_messages` rows, one for the user and one for the reply, in the same write that updates the session. If a new chat's first reply fails, the empty chat is deleted. Deleting a chat removes its messages too.
-- **User memory:** one `user_memory` row per user, replaced each time they start a new chat. Deleting a user removes it.
-- **Users:** a row is added from the Held profile the first time someone logs in. No password is stored, and existing rows are never changed.
-- **Grief notes:** a note is its text and a mood. Held is the main copy; the backend saves a copy and allows one note per user per date. Held has no delete for notes.
-- **Lists:** `Disease` and `Mood` are filled from Held by seed scripts in `agent/scripts/`.
-- **DSM book:** the 6,988 chunks are still stored but not used now that RAG is off.
-- **Security:** row level security is on for all 9 tables, so Supabase's public API keys can't read them. Only the backend, using `DATABASE_URL`, can.
-- **Stored outside the database:** test logins and tokens in `users/*.json` and `.env`, and upload logs in `logs/`. These are all on the local PC only and are not tracked by git.
+- **Chats:** a new chat creates a `ChatSession` row. Each turn adds 2 `ChatMessage` rows in the same write that updates the chat. If a new chat's first reply fails, the empty chat is deleted. Deleting a chat removes its messages.
+- **Hidden memory:** the user memory, the kept profile and the safety check-in mark live in `ChatSession.metadata.memory`, which the API never returns.
+- **Grief notes:** read only, from `GriefNote` and `Mood`, by the grief note tools. Notes are written by the Held app.
+- **Times:** UTC, with millisecond precision. A reply is stamped 1 ms after its message.
+- **Stored outside the database:** the settings in `.env` (git-ignored). Nothing else.
 
 ## 5. Database calls and tokens per message
 
-Measured on 2026-11-04 with real Gemini calls and the live database.
+| Database calls | Count |
+| :--- | :--- |
+| Sign-in check | 1 read |
+| Existing chat | 1 read, 1 write |
+| New chat | Reads of recent chats and the profile, 1 write for the chat, 1 for the turn |
+| Earlier-chat search | 1 read, only when the user refers back |
+| Grief note tools | 1 read per call, only when the agent calls one |
+| Summary | 1 read and 1 write per 10 messages |
 
-| Database calls          | Before              | After                            |
-| ----------------------- | ------------------- | -------------------------------- |
-| Existing chat           | 3 reads, 2 writes   | 1 read, 1 write                  |
-| New chat, first message | 1 read, 4 writes    | 1 read, 2 writes                 |
-| Summary check           | 2 reads per message | 1 read + 1 write per 10 messages |
-| User memory             | None                | 1 write per new chat             |
+Measured on 2026-11-19 with real Gemini calls, for the first message of a chat:
 
-Each request also has its login check, 1 read, as before. The old reads grew with the chat, because every message of it was read twice; the new read is never more than 20 messages.
+| Route | AI calls | Input tokens | Estimated cost |
+| :--- | :--- | :--- | :--- |
+| General support | 3 | 10,840 | $0.0056 |
+| Clinical question | 4 | 11,608 | $0.0068 |
+| Grief | 4 | 11,277 | $0.0065 |
+| Crisis (instant check) | 2 | 9,429 | $0.0073 |
+| Off-topic | 1 | 1,416 | $0.0006 |
 
-| Input tokens per message | Before             | After |
-| ------------------------ | ------------------ | ----- |
-| New chat, first message  | 9,802              | 9,849 |
-| 20 earlier turns         | 23,190             | 9,485 |
-| 220 earlier turns        | 152,767            | 9,490 |
-| 1,000 earlier turns      | Over the old limit | 9,469 |
-
-A message now costs about $0.005 to $0.009 however long the chat is; it was $0.048 near the old limit. Agent 3's instructions, about 4,500 tokens, are most of what remains. Every turn logs a line such as `usage turn session=... calls=3 input=9485 output=265 thinking=988 cost_usd=0.00600`.
+A new chat adds one call for its title. Longer chats cost about the same, because at most 20 messages are sent. Every turn logs a line such as `usage turn session=... calls=4 input=11608 output=517 thinking=792 cost_usd=...`.
 
 ## 6. Reply quality check
 
-The smaller memory was compared with the old whole-chat memory on 2026-11-04: one 44-message test chat and one crisis chat, each question run 3 times, with a separate Gemini call judging each pair of replies without knowing which was which.
+The smaller memory (20 messages plus summary) was compared with sending the whole chat on 2026-11-04, on one 44-message test chat and one crisis chat. Each question ran 3 times, and a separate Gemini call judged each pair without knowing which was which.
 
-| Check                              | Whole chat | First cut     | Final       |
-| ---------------------------------- | ---------- | ------------- | ----------- |
-| Crisis follow-up a few turns later | 6/6        | 0/6           | 6/6         |
-| Old advice repeated as new         | 0/3        | 2/3           | 0/3         |
-| Early detail recalled              | 3/3        | 3/3           | 3/3         |
-| Judge vs old memory                | -          | lost 11 of 12 | won 7 of 12 |
+| Check | Whole chat | Current memory |
+| :--- | :--- | :--- |
+| Crisis follow-up a few turns later ("that feeling is back") | 6/6 | 6/6 |
+| Old advice repeated as new | 0/3 | 0/3 |
+| Early detail recalled | 3/3 | 3/3 |
+| Judge's preference against the whole chat | - | Won 7 of 12 |
 
-The first cut showed only the last 6 messages to the router and kept no list of advice already given, so two changes were added: the router now also reads the user's earlier messages, and the summary lists what was already suggested. This is one test chat and a model as judge, so it is a strong sign rather than proof.
+This is one test chat with a model as judge: a strong sign rather than proof.

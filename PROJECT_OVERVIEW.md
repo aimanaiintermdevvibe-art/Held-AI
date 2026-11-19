@@ -1,233 +1,133 @@
-# Held AI Chatbot — Project Overview
+# Held AI Chatbot: Project Overview
+
+As of 2026-11-19.
 
 ## Executive summary
 
-This repository contains a Python/FastAPI backend for an AI mental-health,
-caregiving, and grief-support chatbot. It uses Google Gemini through a
-multi-agent response pipeline, authenticates users with Held-issued bearer
-tokens, stores conversations in PostgreSQL, and can personalize replies with a
-user profile fetched from the Held application API.
+This repository is the Python (FastAPI) backend of the Held app's AI companion for mental health, caregiving and grief. Google Gemini writes the replies through a four-agent pipeline with a final safety review. Users sign in with Held access tokens, and every conversation is saved in the Held app's own PostgreSQL tables.
 
-The project is a backend and terminal client, not a complete user-facing
-application: there is no web or mobile UI in this repository. Despite clinical
-language in some internal component names, the chatbot is designed for support
-and education, **not to diagnose diseases or prescribe treatment**.
+It is a backend only: the Held mobile app is the user interface. The chatbot gives support and education; it does **not** diagnose, prescribe or replace professional care, and it says so when asked.
 
 ## What is implemented
 
-### Conversation routing and response modes
+### Replies
 
-The agent pipeline in
-[`agent/backend/ai_wrapper/orchestrator.py`](./agent/backend/ai_wrapper/orchestrator.py)
-classifies and routes each turn:
+Each message is routed by Agent 1 and written by Agent 3, then reviewed by Agent 4 ([orchestrator.py](./agent/backend/ai_wrapper/orchestrator.py)).
 
-| Mode | Purpose |
-| --- | --- |
-| `general_support` | Supportive response to ordinary emotional-support requests. |
-| `clinical_support` | Educational mental-health or caregiving support, after structured clinical reasoning. |
-| `grief` | Companioning response to loss; intentionally avoids diagnosing or pathologizing grief. |
-| `crisis` | Prioritizes immediate safety and uses a crisis-safe fallback if generation fails. |
-| `off_topic` | Answers unrelated questions directly, without unnecessary mental-health redirection. |
+| Route | Purpose |
+| :--- | :--- |
+| `general_support` | Everyday emotional support |
+| `clinical_support` | Education about mental-health conditions and caregiving, after Agent 2's clinical reading |
+| `grief` | A companion's reply to loss, never treating grief as an illness |
+| `crisis` | Safety first: a step-by-step risk protocol and verified crisis lines |
+| `off_topic` | Anything outside mental health, wellbeing, caregiving and grief: a short fixed reply, with no answer written |
 
-The intent guardrail, supervisor, and response pipeline are implemented in
-[`agent/backend/ai_wrapper/agents/`](./agent/backend/ai_wrapper/agents/) and
-[`agent/backend/ai_wrapper/supervisor/`](./agent/backend/ai_wrapper/supervisor/).
-Generated responses go through a compliance audit before being returned. The
-streaming endpoint also completes this review before sending any answer text.
+Replies read like a caring person, not a script: no stock sympathy lines, short paragraphs, bold questions, bullets and numbered steps where they help. Code checks the opening line and repeated safety questions.
 
-### “Myself” and caregiver profile personalization
+### Safety
 
-There are two related but distinct kinds of context:
+- **Instant crisis check** before any AI runs, in English, Spanish and Roman Urdu ([policy.py](./agent/backend/ai_wrapper/agents/agent1_intent_guardrail/policy.py)).
+- **Crisis protocol:**
+  - asks about thoughts of ending their life, then a plan, access to means, and timing, one question at a time;
+  - puts safety actions first when danger is immediate;
+  - encourages distance from the means.
+- **Verified support lines** in [support_resources.py](./agent/backend/ai_wrapper/support_resources.py):
+  - the US lines: 988, 911, Poison Control, the National Domestic Violence Hotline, Crisis Text Line, the ANAD helpline and suicide-loss support;
+  - the agents may give no other number;
+  - the first crisis reply of a chat always carries one.
+- **Never unanswered:** when Gemini is unavailable, a message that may show risk gets a fixed crisis reply with 988 and 911.
+- **Hard limits:**
+  - no lethal amounts, methods or ways to hide self-harm, however the request is framed;
+  - "I", "me" and "my" always mean the user, also for a caregiver.
 
-1. **Conversation mode** is selected from the current prompt (for example,
-   grief or clinical support).
-2. **User mode** comes from the user's Held onboarding answers and is one of
-   four: `myself_diagnosed`, `myself_undiagnosed`, `caregiver_diagnosed`,
-   `caregiver_undiagnosed`.
+### Reply modes from the user's profile
 
-For each generation, the API requests the caller's profile from Held
-`GET /auth/me` using the caller's own bearer token. These fields select the mode:
+Four modes, from the user's onboarding answers: `myself_diagnosed`, `myself_undiagnosed`, `caregiver_diagnosed` and `caregiver_undiagnosed`.
 
-- `role` — `SELF` (chatting for themselves) or `CAREGIVER`. A user who has not
-  onboarded has no role, and no mode is assumed.
-- `relation` and `relationOther` — who a caregiver supports.
-- `diseases[].name` — the diagnosed conditions (the cared-for person's, for a
-  caregiver); an empty list means no diagnosis.
+- **Read from:** `User.role` and `relation`, and the conditions in `UserDisease` and `Disease`, through the read-only profile tool ([user_profile.py](./agent/backend/tools/user_profile.py)).
+- **When:** read once per chat and kept with it (hidden from the app). Held's `GET /auth/me` is the fallback.
+- **Effect:** the mode guides reasoning, writing and review. An undiagnosed mode never suggests a condition.
 
-The mode is sent as `user_context` data to the clinical reasoner, the response
-writer and the compliance auditor; it is not used for routing or off-topic
-answers. It informs response wording and relevance; it does not change the
-safety rules or make the chatbot a diagnostic tool, and in an undiagnosed mode
-the prompts forbid suggesting a condition. The modes are derived in
-[`agent/backend/ai_wrapper/profile.py`](./agent/backend/ai_wrapper/profile.py),
-the per-mode guidance is in
-[`agent/backend/ai_wrapper/agents/agent3_empathy_synthesizer/prompt.py`](./agent/backend/ai_wrapper/agents/agent3_empathy_synthesizer/prompt.py),
-and the Held profile request is in
-[`agent/backend/core/auth.py`](./agent/backend/core/auth.py). The mode itself is
-set in the Held app's onboarding. The terminal client [`chat.py`](./chat.py) does not
-log in or register interactively: it signs in the test account chosen by
-`HELD_ACTIVE_USER` in `.env` (`users/user1.json` or `users/user2.json`) and keeps that
-account's tokens refreshed, using
-[`agent/backend/core/held_client.py`](./agent/backend/core/held_client.py).
+### Memory
 
-Profile personalization is **best effort**: if the Held profile request fails,
-the backend logs a warning and continues with an empty profile. A response can
-therefore be generated without the user's role, relationship, or condition
-context.
+- **Within a chat:** the latest 20 messages, plus a rolling summary updated in the background every 10 messages.
+- **New chat:** starts fresh, with a short user memory as silent background.
+- **Recall:** when the user refers back to an earlier chat, a full-text search finds what they said.
+- **Safety check-in:** an earlier safety concern is checked on once per account.
+- **Privacy:** memory is referred to tentatively, and a "what do you remember" list leaves out abuse, suicidal thoughts and self-harm.
 
-### Conversation memory
+See [document/context.md](./document/context.md).
 
-Authenticated turns are associated with a database session. When a session ID
-is supplied, the backend checks ownership and loads that session's messages in
-chronological order. It sends full history when it fits the configured
-character budget; otherwise it uses the stored rolling summary and up to the
-latest 40 messages (20 user/assistant pairs). Older context is summarized
-asynchronously after 10 unsummarized messages. The implementation also loads
-short recaps of up to 10 of the user's other recent conversations.
+### Grief notes
 
-Prompts and final, audited answers are saved as chat messages. Memory is treated
-as context rather than instructions. Each earlier conversation's recap also lists
-`safety_concerns`: the user's messages there that the local crisis check flags
-(for example thoughts of dying), even when they came before the recent messages.
-The writer recalls earlier chats when asked, connects people and situations the
-user mentioned before, and, when an earlier chat had a safety concern and the
-user is now talking about how they feel, checks in gently once per chat. Routing
-never sees other conversations, and off-topic answers do not use them. See
-[`agent/backend/ai_wrapper/memory.py`](./agent/backend/ai_wrapper/memory.py)
-and
-[`agent/backend/api/routers/agentic.py`](./agent/backend/api/routers/agentic.py).
+- **Note tools:** in a chat, Agent 3 may call three read-only tools on the user's own notes: `recent_notes`, `note_by_date` and `mood_summary`.
+  - The user comes only from the token, and arguments are validated and limited.
+  - Note text is data, never instructions, and crisis language in a note takes the crisis path.
+- **Sending a note:** a note the app sends with `isNote: true` starts its own chat and gets a grief companion's reply.
 
-### API and client
+### API
 
-- `POST /agentic/run` returns a complete JSON response.
-- `POST /agentic/stream` streams the reviewed response as Server-Sent Events.
-- Authenticated session routes list sessions, retrieve message history, and
-  delete a session and its messages.
-- Admin-only routes expose read-only user information and database counts.
-- [`chat.py`](./chat.py) is a small streaming terminal client.
-- [`main.py`](./main.py) exposes the FastAPI application from the repository
-  root; the backend application is
-  [`agent/backend/main.py`](./agent/backend/main.py).
-
-Requests are authenticated with a Held HS256 bearer token, verified with
-`JWT_SECRET` or, when signed with another key, confirmed by Held `GET /auth/me`.
-The token subject must correspond to a row in `public."User"`; a Held user who is
-missing is added from their Held profile on first use (also via
-`POST /agentic/users/register`). The backend obtains the role from that user row. Non-admin users can access only their own sessions. Session and
-profile ownership is derived from the validated token, not a client-provided
-user ID.
+`POST /agentic/run` (JSON) and `POST /agentic/stream` (server-sent events), the user's chats (list, read, delete), and public health checks. See [document/api.md](./document/api.md).
 
 ## Database and external services
 
-### PostgreSQL connection
+| Service | Use |
+| :--- | :--- |
+| Held PostgreSQL (`DATABASE_URL`) | Writes `ChatSession` and `ChatMessage`; reads `User`, `UserDisease`, `Disease`, `GriefNote` and `Mood`. Creates no tables and never adds users. See [document/scheme.md](./document/scheme.md) |
+| Held API (`HELD_API_BASE_URL`) | Confirms a token that `JWT_SECRET` cannot verify, and is the profile fallback |
+| Google Gemini (`GEMINI_API_KEY`) | All four agents, chat titles and summaries. A paid key is needed in production |
 
-The backend uses `asyncpg` to connect to the configured PostgreSQL database.
-Configuration supports `DATABASE_URL` and an optional `DATABASE_POOLER_URL`
-fallback. The migration
-[`agent/migrations/001_user_and_chat_tables.sql`](./agent/migrations/001_user_and_chat_tables.sql)
-documents/creates the user and conversation tables used by the agent.
+Deployments:
+- **Render:** runs this repository's `main` branch on the testing Supabase database (Held app tables). Deploys are manual.
+- **Company LAN:** the private `held-ai-supabase` repository holds the same code and is used for local testing on the company database.
 
-| Database object | How the chatbot uses it |
-| --- | --- |
-| `public."User"` | Validates that a token subject exists and reads the user's role; adds Held users it has not seen before (never changes existing rows, stores no password). The admin user endpoints expose limited user fields. |
-| `public.chat_sessions` | Stores the conversation owner, title, status, timestamps, and rolling-summary fields. |
-| `public.chat_messages` | Stores user prompts and final assistant replies; messages are reloaded as conversation context. |
+## What remains
 
-The agent writes conversation data to `chat_sessions` and `chat_messages`.
-Profile registration data is fetched from the Held API rather than being read
-from the PostgreSQL user row for response personalization.
+### Before release
 
-### Held API profile integration
+- A clinician should review a sample of conversations, especially crisis replies and the 6-day limit for safety check-ins.
+- Confirm the crisis lines in `support_resources.py` again, and add lines for each country the app launches in. The database has no country, so `SUPPORT_COUNTRY` sets it.
+- Rotate the database password and secrets that were shared during testing.
+- Add rate limiting per user.
 
-The backend makes an external request to the configured Held API for the
-authenticated user's profile. Held API login/refresh credentials or an initial
-token are configured server-side; the agent keeps the resulting token pair in
-memory. The fetched profile is passed to the response writer as personalization
-context. Profile failures are non-fatal and result in no profile-based
-personalization for that request.
+### App work (Flutter)
 
-### Disease data and diagnosis
+- Treat a stream event with `status` as an error: show it, offer Retry, and keep the user's text.
+- A "What Held remembers" screen to view, delete or turn off memory (needs new endpoints).
+- An app lock or PIN before chat opens.
 
-The disease catalogue is stored in `public."Disease"` (migration
-[`003_diseases.sql`](./agent/migrations/003_diseases.sql)), seeded from Held's public
-`GET /diseases` with [`seed_diseases.py`](./agent/scripts/seed_diseases.py) (21
-conditions; ids are Held's, the same ones in a user's profile `diseases`; re-running
-updates changed entries and deletes nothing). `GET /agentic/diseases` lists it, and the
-admin overview counts it. **Each user's own conditions are not stored in Supabase:**
-they still come live from the Held profile, whose `diseases` select the user's mode.
+### Engineering
 
-Retrieval (RAG) covers only documents users upload themselves: they are chunked,
-embedded with `gemini-embedding-001` and stored in Supabase with pgvector
-(`documents`, `document_chunks`; migration
-[`002_documents_pgvector.sql`](./agent/migrations/002_documents_pgvector.sql)), and
-relevant passages are given to the agents as `document_excerpts` (see
-[`agent/backend/rag/`](./agent/backend/rag/)). There is no curated medical reference
-source. The system can discuss concerns educationally and account for a
-profile-provided diagnosis, but it does **not** establish or verify a diagnosis.
-
-## What remains / recommended next work
-
-### Needed to make profile-based care reliable
-
-- Confirm and document the Held profile API's actual response schema, including
-  how diagnoses/conditions are represented. The current prompt builder expects
-  `diseases` to be a list of objects containing `name`.
-- Add contract tests for `SELF`, `CAREGIVER`, relationship variants, populated
-  and empty disease lists, and profile API failures.
-- Decide whether profile lookup should remain best-effort or whether a failed
-  lookup should be surfaced to the client for use cases that require accurate
-  personalization.
-
-### Needed if disease catalogue or disease diagnosis is a product goal
-
-- Define the clinical scope and safety/regulatory requirements before
-  implementing any diagnostic feature. The current product behavior and prompts
-  explicitly prohibit diagnosis.
-- If the goal is to provide context-aware education rather than diagnosis, add
-  an approved, maintained medical reference source and a retrieval/citation
-  design; there is no such source wired in today.
-- If the product requires user-condition records in this database (the catalogue
-  is already seeded), add an explicitly designed schema, ownership/consent rules,
-  migrations, data validation, API operations, and tests.
-
-### Product and engineering follow-up
-
-- Add a web/mobile interface if users need more than the terminal client or
-  direct API integration.
-- Add operational checks against the live Gemini and Held services; the
-  existing tests use a fake provider and do not establish live service
-  availability or response quality.
-- Align the existing project documentation. The root
-  [`README.md`](./README.md) and [`agent/README.md`](./agent/README.md) contain
-  statements that conflict with the current source (including whether
-  authentication, persistence, sessions, and profile retrieval exist).
-  [`document/context.md`](./document/context.md) also describes a different
-  summary-storage design than the current `session_summary` and
-  `last_summarized_message_id` columns.
+- A full-text index for earlier-chat search.
+- Move the background summary jobs out of the web process if traffic grows.
+- Turn the safety audit's 63 scenarios into an automated regression test run before every prompt or model change.
+- Update `ChatSession.lastMessageAt` when a message is saved, if the app sorts by it.
 
 ## Repository map
 
-- [`agent/backend/api/`](./agent/backend/api/) — FastAPI routes and session handling.
-- [`agent/backend/ai_wrapper/`](./agent/backend/ai_wrapper/) — Gemini client, agents, routing, safety review, memory, and usage accounting.
-- [`agent/backend/core/`](./agent/backend/core/) — configuration and Held/JWT authentication.
-- [`agent/backend/db/`](./agent/backend/db/) — PostgreSQL connection and repository queries (including pgvector document search).
-- [`agent/backend/rag/`](./agent/backend/rag/) — document text extraction, chunking, ingestion and retrieval for chat.
-- [`agent/backend/schemas/`](./agent/backend/schemas/) — request/response models.
-- [`agent/tests/`](./agent/tests/) — API, authentication, memory, safety policy, and conversation tests.
-- [`document/`](./document/) — API, memory, and schema design notes; check against source where they differ.
+| Path | Contents |
+| :--- | :--- |
+| [`agent/backend/api/`](./agent/backend/api/) | FastAPI routes |
+| [`agent/backend/ai_wrapper/`](./agent/backend/ai_wrapper/) | The four agents and their prompts, the Gemini client, routing, memory, support lines and token logging |
+| [`agent/backend/core/`](./agent/backend/core/) | Settings and Held token authentication |
+| [`agent/backend/db/`](./agent/backend/db/) | Connection pool and queries on the Held tables |
+| [`agent/backend/grief/`](./agent/backend/grief/) | The grief note tools |
+| [`agent/backend/tools/`](./agent/backend/tools/) | The profile tool |
+| [`agent/backend/schemas/`](./agent/backend/schemas/) | Request and response models |
+| [`agent/tests/`](./agent/tests/) | 431 tests; they use an in-memory stand-in, so they need no database or Gemini |
+| [`document/`](./document/) | API, memory and schema reference |
 
 ## Overall status
 
 | Area | Status |
-| --- | --- |
-| Multi-mode conversational support and safety review | Implemented |
-| Authenticated sessions and stored conversation history | Implemented |
-| Rolling and cross-conversation memory | Implemented |
-| `SELF` / `CAREGIVER` personalization from Held profile | Implemented, dependent on external profile availability/schema |
-| Profile-provided diagnosed-condition context | Partial; optional Held profile field only |
-| Disease catalogue in PostgreSQL (seeded from Held) | Implemented |
-| Users' own conditions in PostgreSQL | Not implemented (read live from the Held profile) |
-| RAG over user-uploaded documents (pgvector) | Implemented |
-| Curated medical reference retrieval | Not implemented |
-| Automated disease diagnosis | Not implemented and prohibited by current prompts |
-| Web/mobile user interface | Not present in this repository |
+| :--- | :--- |
+| Five routes with safety review | Done |
+| Crisis protocol, verified support lines, answer during outages | Done (US lines) |
+| Scope limit (off-topic declined) | Done |
+| Signed-in chats saved in the Held tables | Done |
+| Chat summary, user memory and earlier-chat recall | Done |
+| Four reply modes from the Held profile | Done |
+| Grief note tools and notes sent from the app | Done |
+| Support lines for other countries | Not yet |
+| Memory screen, app lock, stream error handling in the app | App work, not started |
+| Diagnosis or prescribing | Not offered, by design |

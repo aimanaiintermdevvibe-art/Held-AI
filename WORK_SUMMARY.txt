@@ -1,102 +1,88 @@
 HELD AI CHATBOT - WORK SUMMARY
+As of 2026-11-19
 ==================================================
 
-1. WHAT WAS DONE
+1. WHAT IS BUILT
 ----------------
-- Profiles: the agent called Held's GET /users/{id}, which does not exist, so personalisation
-  silently failed. It now reads GET /auth/me with the caller's own token.
-- User modes: four modes from the Held profile (myself / caregiver x diagnosed / no diagnosis),
-  given to the reasoner, writer and safety auditor.
-- Test accounts: no login/sign-up in the terminal chat. users/user1.json (hashirflutter) and
-  users/user2.json (princejack66) hold credentials and their own token pair; HELD_ACTIVE_USER=1|2
-  in .env selects one. Tokens refresh automatically (rotation-safe, cross-process lock).
-  agent/scripts/refresh_token.py writes a fresh token into .env for Postman.
-- Authentication: tokens signed with JWT_SECRET are verified locally; tokens signed by Held's
-  test server are confirmed with Held (cached 60 s). Held users missing from Supabase are added
-  automatically (POST /agentic/users/register does it explicitly).
-- Cross-chat memory fixed (see section 4).
-- Disease catalogue: 21 diseases seeded from Held into public."Disease".
-- Documents + RAG with pgvector, background ingestion for any length (section 2).
-- Grief notes with workbook exercises (section 3).
-- Tests: 279 passed, 1 pre-existing failure (test_odd_unicode_spaces_are_normalised).
-- Postman: postman/Held_AI_Agent.postman_collection.json (logs in to Held automatically).
-- Logs: logs/rag_pgvector_setup_and_test.log (setup and tests), logs/document_ingestion.log
-  (live embedding progress).
+- Four-agent pipeline (Gemini gemini-3.5-flash-lite): Agent 1 routes, Agent 2 reasons (clinical
+  and grief only), Agent 3 writes, Agent 4 reviews for safety. Routes: general support, clinical,
+  grief, crisis, off-topic.
+- Database: the Held app's own PostgreSQL tables. Writes ChatSession and ChatMessage; reads User,
+  UserDisease, Disease, GriefNote and Mood. No migrations, no tables of its own, never adds users.
+- Sign-in: every request needs a Held access token, verified with JWT_SECRET (or confirmed by
+  Held's GET /auth/me). Guest mode (AUTH_DISABLED) is gone.
+- Reply modes: myself / caregiver x diagnosed / undiagnosed, from the profile tool (User,
+  UserDisease, Disease), read once per chat. "I", "me" and "my" always mean the user.
+- Scope: anything outside mental health, wellbeing, caregiving and grief gets a short fixed reply
+  (space, sport, coding, math, recipes...). Never in a chat where the user's own risk came up.
+- Replies: ChatGPT-like formatting (short paragraphs, bold questions, bullets, numbered steps), no
+  stock sympathy lines, no assumed gender or details, ambiguous words asked about.
+- Token use per reply: stored in ChatMessage.metadata.usage; shown to the app only when
+  SHOW_TOKEN_USAGE=true (off by default).
+- Tests: 431 passed.
 
-Supabase migrations (agent/migrations, apply with python agent/migrations/apply.py <file>):
-  002 documents + document_chunks (pgvector, vector(768), HNSW)   003 Disease
-  004 background ingestion (status, progress, resumable)           005 grief_notes + Mood
+2. SAFETY
+---------
+- Instant crisis check before any AI call, in English, Spanish and Roman Urdu.
+- Crisis protocol: thoughts of ending their life, then plan, access to means, timing, one
+  question per reply; safety actions first in immediate danger; distance from the means; grounding
+  only when it fits.
+- Verified support lines (agent/backend/ai_wrapper/support_resources.py, SUPPORT_COUNTRY=US):
+  988, 911, Poison Control 1-800-222-1222, National Domestic Violence Hotline 1-800-799-7233,
+  Crisis Text Line (HOME to 741741), ANAD 1-888-375-7767, AFSP and Alliance of Hope. The agents
+  may give no other number; code adds the crisis line to a chat's first crisis reply.
+- Never unanswered: when Gemini fails (rate limit, outage), a message that may show risk gets a
+  fixed crisis reply with 988 and 911 instead of an error.
+- No lethal amounts, methods or ways to hide self-harm, however the request is framed.
+- Says it is an AI, not a therapist, when asked.
+- Two safety audits by the developer (19 Nov 2026, 63 scenarios, two accounts) were fixed and
+  re-run live. Account isolation passed 20 of 20 checks.
 
-2. DOCUMENTS (RAG)
-------------------
-All endpoints need the Held bearer token; users only see their own documents.
-  POST   /agentic/documents                upload .txt/.md/.pdf/.docx (form-data "file", any length, 50 MB)
-                                           -> 202 queued; the same file again -> 200 (resumes if stopped)
-  GET    /agentic/documents                list (status, chunk_count/total_chunks, progress %)
-  GET    /agentic/documents/{id}           status + page of chunks (?chunk_offset=0&chunk_limit=50)
-  POST   /agentic/documents/search         {"query": "...", "top_k": 5} -> nearest chunks + similarity
-  DELETE /agentic/documents/{id}           document and its chunks
-How it works:
-- Upload extracts the text (PDF keeps page numbers), splits it into ~800-character chunks with
-  150 characters of overlap and stores them. A background worker in the server embeds them with
-  gemini-embedding-001 (768 dims), 100 per request, saving each batch.
-- Status: queued -> processing -> ready; paused while Gemini's daily quota is used up (continues
-  by itself); failed on other errors (upload the same file again to resume). Unfinished documents
-  resume when the server starts. INGESTION_WORKER=false turns the worker off in an instance.
-- Chat: each message is embedded and the user's chunks with cosine similarity >= 0.55 are given
-  to the agents; the reply cites the file and the response lists "sources".
-- agent/scripts/split_document.py splits a long PDF into page ranges, or text/Word into parts.
-
-3. GRIEF NOTES (with workbook exercises)
-----------------------------------------
-Held's notes API (one note per user per date, with a mood) stays the source of truth. The agent
-writes/reads through it with the caller's token and stores every note in public.grief_notes,
-together with the workbook exercise it answers (kept by the agent only).
-  GET    /agentic/grief-notes/exercises    9 guided exercises (key, title, prompt)
-  GET    /agentic/grief-notes/moods        20 moods (seeded from Held)
-  POST   /agentic/grief-notes/sync         store all existing Held notes of the user
-  GET    /agentic/grief-notes              list, newest first (?page&limit&from&to); stored copy if Held is down
-  POST   /agentic/grief-notes              {"date","content","mood" or "moodId","exercise"?}; 409 if the date exists
-  GET    /agentic/grief-notes/{date}       one note
-  PATCH  /agentic/grief-notes/{date}       content/mood (to Held) and/or exercise (null clears it)
-- No delete: Held's API has none.
-- Chat: a message that mentions the user's notes/journal/diary/workbook gets their 10 most
-  recent notes as context; other messages do not.
-- Saving notes from chat is not offered: Held requires a mood and one note per day, which the
-  agent would have to guess.
-- Live: user 1's 5 existing notes are stored. Create/edit were tested against a simulated Held
-  only, because Held cannot delete notes and test notes would stay on the test accounts.
+3. GRIEF NOTES
+--------------
+- Notes are written in the Held app. The agent only reads them.
+- In chat, Agent 3 may call three read-only tools when the answer needs the notes:
+    recent_notes   the last N days (at most 90) and notes (at most 20)
+    note_by_date   one date (YYYY-MM-DD)
+    mood_summary   note count and mood frequencies, overall and by week
+  The user comes only from the token; arguments are validated; 1,500 characters per note and at
+  most 4 calls per message. Note text is data, never instructions; crisis language in a note
+  takes the crisis path. Dates are UTC. Logs never hold note text.
+- A note sent from the app with "isNote": true starts its own chat and gets a grief companion's
+  reply. Its mood reaches the agent only if the app writes it into the prompt.
 
 4. HOW CONTEXT MEMORY WORKS
 ---------------------------
-- Same chat (session_id): the whole conversation when it fits (120,000 characters); otherwise a
-  rolling summary of older turns (written in the background every 10 messages) + the latest
-  40 messages.
-- New chats: recaps of the user's 10 most recent other chats (title, summary if any, the user's
-  last 6 messages) plus "safety_concerns" (their messages there flagged by the crisis check, e.g.
-  "I want to die").
-- The writer recalls earlier chats when asked, connects people/situations mentioned before, and
-  checks in gently once per chat about an earlier safety concern when the user talks about how they
-  feel. Routing and off-topic answers never use other chats.
-- Not yet: the bot's own earlier replies, chats older than the latest 10, long-term facts, and
-  clearing a resolved safety concern (planned "proper context memory" work).
+- Same chat: the latest 20 messages, plus a rolling summary (up to 250 words) of older ones,
+  updated in the background every 10 messages.
+- New chat: starts fresh, with a short user memory (up to 150 words) as silent background.
+- Recall: when the user refers back to an earlier chat, a full-text search over the last 365 days
+  gives the writer the top 5 excerpts.
+- Safety check-in: an earlier concern (last 6 days) is checked on once per account, only when the
+  user talks about how they feel, never in a reply about a new loss.
+- Memory is referred to tentatively; a "what do you remember" list leaves out abuse, suicidal
+  thoughts and self-harm.
 
-5. WHY THE DSM-5-TR BOOK IS NOT VECTORISED YET
-----------------------------------------------
-- The PDF produces 6,988 chunks. Gemini's free tier embeds at most ~100 chunks per minute and
-  ~1,000 per day per key.
-- Status now: paused at 900/6,988 (12.9%). The daily quota of the new key ran out; the worker
-  continues automatically at about 2026-10-29 11:58 if the server is running (or at the next start).
-- At this rate the whole book needs about 7 days. Until then, search and chat only see the
-  embedded part (roughly the first 13% of the book), and once a day's quota is used up, chat
-  document search returns nothing for the rest of that day.
-- To finish quickly: enable billing on the Gemini key (minutes, small cost), or upload only the
-  chapters needed (split_document.py), or use larger chunks (DOCUMENT_CHUNK_CHARS).
-- Note: DSM-5-TR is copyrighted by the APA; check licensing before using it in the product.
+5. DEPLOYMENT
+-------------
+- Render (https://held-ai.onrender.com): this repository's main branch, manual deploy. Uses the
+  testing Supabase database (Held app tables) and a paid Gemini key.
+- Render environment: DATABASE_URL, GEMINI_API_KEY, JWT_SECRET (the key of the Held backend that
+  issues the tokens). HELD_API_BASE_URL may be empty. SHOW_TOKEN_USAGE and SHOW_API_DOCS off.
+- The private repository hashirflutter/held-ai-supabase holds the same code for local testing.
 
 6. HOW TO RUN
 -------------
-  Server:   cd agent ; ..\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-  Chat:     .venv\Scripts\python.exe chat.py            (user from HELD_ACTIVE_USER in .env)
-  Token:    .venv\Scripts\python.exe agent\scripts\refresh_token.py   (for Postman, 15 minutes)
+  Settings: copy agent/.env.example to agent/.env (or .env at the root) and fill it in.
+  Install:  cd agent ; ..\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
   Tests:    cd agent ; ..\.venv\Scripts\python.exe -m pytest -q
+  Server:   cd agent ; ..\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+            (from the repository root: python -m uvicorn main:app)
+  Swagger:  set SHOW_API_DOCS=true, then open http://127.0.0.1:8000/docs and Authorize with a Held
+            access token (tokens last 15 minutes).
+
+7. STILL TO DO
+--------------
+- Clinician review of crisis replies; support lines for other countries.
+- App (Flutter): show stream error events with Retry; a "What Held remembers" screen; app lock.
+- Rotate the credentials shared during testing; add per-user rate limiting; a full-text index.

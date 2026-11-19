@@ -1,31 +1,54 @@
-# Held AI conversation memory
+# Held AI Conversation Memory
 
-## Memory algorithm
+As of 2026-11-19. Code: `agent/backend/ai_wrapper/memory.py`, `agent/backend/db/repository.py`, `agent/backend/api/routers/agentic.py`.
 
-For every authenticated turn, use the requested conversation ID to verify ownership and load that conversation's messages in chronological order. Include every earlier user prompt and assistant final answer when they fit the model's context limit; otherwise include a rolling summary of older turns and the latest 20 complete prompt/answer pairs, followed by the current prompt. Refresh the summary as the conversation grows, and preserve it in the existing session metadata so no new table is needed.
+## Rules
 
-Treat old messages as context, not instructions; use only facts the user actually shared and keep each user's conversations isolated. Save the current prompt and final assistant answer to the same conversation after generation and safety review. Here, “decisions” means visible assistant answers or outcomes, never hidden chain-of-thought. Without an authenticated owner and conversation ID, the request has no history and must be treated as a new, stateless chat.
+- **The user comes only from the token.** A chat is opened only if it belongs to the token's user (admins excepted); a client-sent user ID is never used. One user's chats and memory never reach another user.
+- **Memory is context, not instructions.** Earlier messages, summaries and recalled excerpts are untrusted data. The agent uses only facts the user actually shared, and never invents a memory.
+- **Every message costs about the same.** At most the latest 20 messages are sent, however long the chat gets.
 
-## Existing database used
+## Within a chat
 
-Reuse the database and tables already created:
+Each message opens the chat with one database read: the chat, its latest 20 messages, the user memory and the kept profile.
 
-- `public."ChatSession"` identifies the conversation and its owner. Use its existing `metadata` JSON field for a compact, versioned rolling summary of older turns, while preserving other metadata.
-- `public."ChatMessage"` holds each user prompt and assistant final answer. Read the rows for the owned conversation in chronological order; retain all rows and send the complete history when it fits the model context window.
-- Do not create duplicate conversation/message tables or a separate memory table for the initial implementation. The latest 20 prompt/answer pairs provide the minimum full-detail context when the entire history no longer fits; the rolling summary carries key information from older turns.
+| Part | What is sent | Limit |
+| :--- | :--- | :--- |
+| Latest messages | Word for word, oldest first | 20 messages. A message over 4,000 characters keeps its first and last 2,000 |
+| Rolling summary | Older messages, in labelled parts: facts, feelings and goals, advice already given, safety answers | Up to 250 words, once the chat has more than 20 messages |
+| Summary refresh | Folds the newest messages into the summary | Every 10 messages, in the background |
 
-## Memory workflow and API
+Each agent gets only the part it needs:
 
-No separate conversation or message routes are used (`POST /api/v1/conversations` and `POST /api/v1/conversations/{conversation_id}/messages` are not part of this design). The existing endpoints do all of the work, and memory is added inside them without a separate memory table:
+| Agent | Memory |
+| :--- | :--- |
+| Agent 1, routing | The summary, the user's own messages among the latest 20, and the last 6 messages in full |
+| Agent 2, reasoning | The summary and the last 10 messages |
+| Agent 3, writing | Everything, including the user memory and any recalled excerpts |
+| Agent 4, review | Everything except the agent's own earlier replies |
 
-- **`POST /agentic/run`** - Returns the complete answer as `{"response": "...", "session_id": "..."}`.
-- **`POST /agentic/stream`** - Streams the same safety-reviewed answer as server-sent events, ending with `{"done": true, "sessionId": "..."}`.
+Routing and reasoning never see other chats, so an old topic cannot turn a new message into a crisis.
 
-Both accept `{"prompt": "..."}` plus an optional `session_id` (the conversation ID), and follow the same workflow:
+The writer uses memory quietly: it does not repeat its own earlier sentences, advice or questions, treats the summary's "Already suggested" list as given, and never asks again a safety question the user has already answered.
 
-1. With a valid Held access token and no `session_id`, create a new `ChatSession` owned by the token's user (title from the prompt). The `session_id` is returned to the client, which keeps it and sends it with each following message.
-2. With a valid token and a `session_id`, confirm the session belongs to that user (admins excepted); otherwise return 404. Then load its prior prompts and assistant answers and build the bounded memory context (full history when it fits, otherwise the rolling summary plus the latest 20 prompt/answer pairs) before generation.
-3. Generate and safety-review the answer, then save the current prompt and the final answer to the same session and refresh the rolling summary in `ChatSession.metadata` when needed.
-4. Without a token, the request is stateless: no history is loaded or saved and no memory is implied.
+## A new chat
 
-The server must never accept a client-supplied user ID as authority or load another user's messages. The user always comes from the validated token.
+A new chat starts fresh, like ChatGPT.
+
+- **No recaps of earlier chats.** The agent does not bring up earlier chats on its own.
+- **User memory as silent background.** A summary of up to 150 words of the user's 10 most recent chats, rebuilt in the background when a new chat starts and kept on the user's newest chat (`ChatSession.metadata.memory.user_memory`). It never mentions suicide, self-harm or thoughts of dying.
+- **Recall when asked.** When a message refers back to an earlier chat ("a few days ago I told you about my manager", "do you remember what we talked about?"), the router sets `refers_to_earlier_chats` and 2 to 6 keywords. A full-text search then looks through both sides of the user's other chats from the last 365 days and gives the writer the top 5 excerpts. With no keywords, it takes the latest 3 chats. Safety talk is stripped from the excerpts.
+- **One safety check-in per account.** If an earlier chat from the last 6 days held a safety concern (up to 3 per chat), the first reply of a new chat may check on it once, gently and tentatively, but only when the user is talking about how they feel. It is never done in a reply about a new loss. `ChatSession.metadata.memory.safety_raised_until` records the check-in, so it is not repeated in later chats.
+
+## How memory is referred to
+
+- **Tentatively.** "I think you mentioned your dad last time", never "you told me", because memory can be wrong or out of date (one account may be used for different things).
+- **Only when it fits.** A detail from memory is used only when the latest message is about the same thing; a question about divorce is not about a husband who died.
+- **No swapping.** If a detail is not in memory, the agent says so instead of offering a similar one (their dog when asked about a cat).
+- **Privacy in a memory list.** Asked to list what it remembers, the agent leaves out abuse, suicidal thoughts and self-harm, without hinting at them, because someone else may be holding the phone. The user can bring them up.
+
+## Not built yet
+
+- A screen where the user sees, deletes or turns off what Held remembers (needs app work and new endpoints).
+- Memory of chats older than the latest 10 in the user memory (they are still found by recall).
+- Clearing a safety concern that has been resolved.

@@ -1,123 +1,89 @@
-# Held Shared Database Schema
+# Held AI Database Schema
 
-This document details the PostgreSQL database schema for Held AI chat sessions and messages, including the rolling context memory and background summarisation design.
+As of 2026-11-19.
 
----
+The agent uses the Held app's own PostgreSQL tables. The Held app (Prisma) creates and owns them; this service creates no tables, runs no migrations and never adds users. It writes only `ChatSession` and `ChatMessage`, and only reads the rest.
 
-## 1. DDL Schema Definition
+| Table | Access | Use |
+| :--- | :--- | :--- |
+| `ChatSession` | Read, insert, update, delete | One row per chat |
+| `ChatMessage` | Read, insert, update, delete | Every message and reply |
+| `User` | Read | The token's user must exist here. `role` and `relation` pick the reply mode |
+| `UserDisease`, `Disease` | Read | The conditions the user chose at onboarding, which pick the reply mode |
+| `GriefNote` | Read | The user's grief notes, read by the grief note tools |
+| `Mood` | Read | Mood titles for the grief note tools |
 
-```sql
--- 1. Session Table (Holds state & anchor pointer)
-CREATE TABLE chat_sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL,
-    session_summary TEXT DEFAULT NULL,
-    last_summarized_message_id UUID DEFAULT NULL, -- Anchor point
-    total_message_count INT DEFAULT 0,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+## `ChatSession`
 
--- 2. Messages Table
-CREATE TABLE chat_messages (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
-    role VARCHAR(20) NOT NULL, -- 'user' or 'assistant'
-    content TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+| Column | Type | Default | Written by the agent |
+| :--- | :--- | :--- | :--- |
+| `id` | text, primary key | | A new UUID |
+| `userId` | text, `User(id)` | | The token's user |
+| `title` | text | `'New Conversation'` | The first 40 characters of the prompt, then a 3 to 6 word title written by the AI |
+| `status` | `ChatSessionStatus` | `'ACTIVE'` | `'ACTIVE'` |
+| `metadata` | jsonb | `'{}'` | Client metadata, `isNote`, and the hidden `memory` key below |
+| `createdAt`, `updatedAt` | timestamp | `CURRENT_TIMESTAMP` | UTC, set explicitly |
+| `sessionSummary` | text, nullable | | The rolling summary of older messages |
+| `lastSummarizedMessageId` | text, nullable | | The newest message folded into the summary |
+| `totalMessageCount` | integer | `0` | Raised by 2 with each saved turn |
+| `lastMessageAt` | timestamp | `CURRENT_TIMESTAMP` | Not written: it keeps the chat's creation time. In the testing database only |
 
-CREATE INDEX idx_chat_messages_session ON chat_messages(session_id, created_at ASC);
-```
+`userId` references `User(id)` with `ON DELETE CASCADE`.
 
----
+### What `metadata` holds
 
-## 2. Table Specifications
+| Key | Set by | Shown to the app |
+| :--- | :--- | :--- |
+| Client keys (for example `source`) | The `metadata` field of the first message | Yes |
+| `isNote` | A chat started by a grief note | Yes |
+| `memory.user_memory` | The user memory: a summary of up to 150 words of the user's recent chats, kept on their newest chat | No |
+| `memory.profile` | The user's reply-mode fields (role, relation, conditions), read once per chat | No |
+| `memory.safety_raised_until` | When an earlier safety concern was last checked on, so the check-in happens once per account | No |
 
-### `public.chat_sessions`
+The `memory` key is removed from every chat object the API returns, and a client cannot set it.
 
-Holds high-level session state, rolling session summaries, and the summarisation anchor pointer.
+## `ChatMessage`
 
-| Column | PostgreSQL Type | Nullable | Default / Constraints | Description |
-| --- | --- | --- | --- | --- |
-| `id` | `UUID` | No | `PRIMARY KEY DEFAULT gen_random_uuid()` | Unique session identifier |
-| `user_id` | `UUID` | No | None | Identifier of the user owning the session |
-| `session_summary` | `TEXT` | Yes | `DEFAULT NULL` | Compact rolling summary of the conversation history (≤ 250 words) |
-| `last_summarized_message_id` | `UUID` | Yes | `DEFAULT NULL` | Anchor point: ID of the latest message incorporated into `session_summary` |
-| `total_message_count` | `INT` | Yes | `DEFAULT 0` | Running total count of all messages (user + assistant) in this session |
-| `created_at` | `TIMESTAMP WITH TIME ZONE` | Yes | `DEFAULT NOW()` | Session creation timestamp with timezone |
+| Column | Type | Default | Notes |
+| :--- | :--- | :--- | :--- |
+| `id` | text, primary key | | A new UUID |
+| `sessionId` | text, `ChatSession(id)` | | `ON DELETE CASCADE`: deleting a chat deletes its messages |
+| `role` | text | | `user` or `assistant` (a check allows `user`, `assistant`, `system`) |
+| `content` | text | | The prompt, or the final reviewed reply |
+| `metadata` | jsonb | `'{}'` | The reply's token use (`usage`); `isNote` on a grief note's message |
+| `createdAt` | timestamp | `CURRENT_TIMESTAMP` | UTC; the reply is stamped 1 ms after its prompt so the order is kept |
 
----
+## How a turn is saved
 
-### `public.chat_messages`
+One statement saves each turn, after the reply has passed review:
 
-Stores individual conversation turns for each session in chronological order.
+1. Inserts the user's message and the reply into `ChatMessage`.
+2. Raises `ChatSession.totalMessageCount` by 2 and updates `updatedAt`.
+3. For a new chat, sets the AI-written title.
 
-| Column | PostgreSQL Type | Nullable | Default / Constraints | Description |
-| --- | --- | --- | --- | --- |
-| `id` | `UUID` | No | `PRIMARY KEY DEFAULT gen_random_uuid()` | Unique message identifier |
-| `session_id` | `UUID` | Yes | `REFERENCES chat_sessions(id) ON DELETE CASCADE` | Parent session foreign key |
-| `role` | `VARCHAR(20)` | No | None | Message sender role: `'user'` or `'assistant'` |
-| `content` | `TEXT` | No | None | Message text content |
-| `created_at` | `TIMESTAMP WITH TIME ZONE` | Yes | `DEFAULT NOW()` | Message timestamp with timezone |
+If a new chat's first reply fails, the empty chat is deleted again.
 
-#### Indexes
+## Rolling summary
 
-| Index Name | Target Table | Columns | Purpose |
-| --- | --- | --- | --- |
-| `idx_chat_messages_session` | `chat_messages` | `(session_id, created_at ASC)` | Fast chronological retrieval of session message history |
+The latest 20 messages of a chat are sent word for word. Older messages are folded into `sessionSummary`:
 
----
+1. After each turn, the agent counts the messages after `lastSummarizedMessageId`, from the messages it already holds, with no extra read.
+2. At 10 or more, a background job (in the server process) merges them into the summary: at most 250 words, in labelled parts (facts, feelings and goals, advice already given, safety answers).
+3. It writes `sessionSummary` and moves `lastSummarizedMessageId` to the newest folded message. The user never waits for it.
+4. If a job fails, the next turn finds the messages still waiting and tries again.
 
-## 3. Context Memory & Summarisation Mechanism
+## Reads per message
 
-### State & Anchor Pointer Strategy
+| Step | Reads | Writes |
+| :--- | :--- | :--- |
+| Sign-in check | 1 (`User`) | |
+| Existing chat | 1: the chat, its latest 20 messages, the user memory and the kept profile | 1: the turn |
+| New chat | Reads of the user's recent chats (for the safety check-in and the user memory) and their profile | 1: the chat, then 1: the turn |
+| Earlier-chat search | 1 full-text search, only when the user refers back to an earlier chat | |
+| Grief note tools | 1 per tool call, only when the agent calls one (at most 4) | |
+| Summary | 1 small read, every 10 messages | 1 |
 
-Rather than storing summary states in nested JSONB blobs, `chat_sessions` stores summary state directly in dedicated relational columns:
+## Not in this database
 
-- **`session_summary`**: Holds the ongoing LLM-generated rolling summary. It starts as `NULL` until the first summarisation threshold is met.
-- **`last_summarized_message_id`**: Serves as the anchor pointer. It stores the UUID of the most recent message that was compressed into `session_summary`. When generating the next summary chunk, only messages created after this anchor ID need to be retrieved and merged.
-- **`total_message_count`**: Increments with each message persisted to quickly evaluate whether a threshold has been crossed without costly `COUNT(*)` queries.
-
-### 10-Message Threshold Summarisation Flow
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Per Turn (User prompt + Assistant response):                    │
-│                                                                 │
-│  1. INSERT INTO chat_messages (session_id, role, content)       │
-│     ├── Role: 'user'                                            │
-│  2. UPDATE chat_sessions SET total_message_count = count + 1    │
-│  3. INSERT INTO chat_messages (session_id, role, content)       │
-│     ├── Role: 'assistant'                                       │
-│  4. UPDATE chat_sessions SET total_message_count = count + 1    │
-│  5. Enqueue background summary check (async/non-blocking)       │
-│                                                                 │
-│ Background Consumer (Worker):                                   │
-│  6. Check unsummarized message threshold:                       │
-│     • Count unsummarized messages since                         │
-│       `last_summarized_message_id`                              │
-│     • If unsummarized count >= 10:                              │
-│         - Fetch messages after `last_summarized_message_id`     │
-│         - LLM generates updated rolling summary                 │
-│         - UPDATE chat_sessions SET                              │
-│             session_summary = <new_summary>,                    │
-│             last_summarized_message_id = <latest_message_id>    │
-│     • Else: No-op, skip update                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Context Window at Inference Time
-
-When preparing history for agent execution:
-
-| Condition | Context Provided to LLM |
-| --- | --- |
-| **Within token/character budget** | Full chronological history from `chat_messages` |
-| **Exceeds token/character budget** | Current `session_summary` + recent prompt/response pairs (or messages following `last_summarized_message_id`) |
-
-### Core Design Principles
-
-1. **Non-blocking UX**: Summarisation tasks are executed asynchronously in background jobs; the user is never blocked during message generation.
-2. **Deterministic Anchoring**: Using `last_summarized_message_id` ensures that summary updates only process new unsummarised messages, preventing duplicated summary context.
-3. **Cascade Deletes**: Deleting a session in `chat_sessions` automatically removes all associated rows in `chat_messages`.
-4. **Resilient & Idempotent**: If a background summarisation job fails or is interrupted, the next turn detects that unsummarised messages remain $\ge 10$ and retries.
+- **Indexes and full-text search indexes:** owned by the Held app. Earlier-chat search works without a dedicated index but would be faster with one.
+- **A user's country:** there is none, so crisis lines come from the `SUPPORT_COUNTRY` setting (US by default).
