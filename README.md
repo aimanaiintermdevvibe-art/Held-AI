@@ -47,7 +47,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-All 418 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
+All 431 tests should pass. They use an in-memory stand-in, so they need neither the database nor Gemini.
 
 **4. Run.**
 
@@ -121,4 +121,4 @@ The response is `{"response": "...", "session_id": "...", "session": {...}}`. Se
 - **Crisis safety:** the instant crisis check runs on every message (English, Spanish and Roman Urdu). Crisis replies follow a step-by-step protocol (thoughts, plan, access to means, timing), put safety actions first when the danger is immediate, and are never left unanswered: when Gemini is unavailable (a rate limit or an outage), a message that may show risk gets a fixed crisis reply with 988 and 911 instead of an error.
 - **Support lines:** replies give only the verified lines in `backend/ai_wrapper/support_resources.py` (for the US: 988, 911, Poison Control, the National Domestic Violence Hotline, Crisis Text Line, the ANAD helpline and suicide-loss support). The first crisis reply in a chat always carries one; code adds it when the reply did not. The country comes from `SUPPORT_COUNTRY` (default `US`); any other country gets Find A Helpline. Check the list before launch.
 - **Rate limits:** a Gemini rate limit is waited out once when the wait is 10 seconds or less. Use a paid Gemini key in production: each message makes about 4 model calls.
-- **Privacy:** a rejected request (422) says what is wrong but never echoes the prompt back. Token use is stored with each reply but shown to the app only when `SHOW_TOKEN_USAGE` is on (off by default).
+- **Privacy:** a rejected request (422) says what is wrong but never echoes the prompt back. Token use is stored with each reply but shown to the app only when `SHOW_TOKEN_USAGE` is on (off by default). Asked to list what it remembers, the agent leaves out sensitive disclosures (abuse, suicidal thoughts, self-harm), since someone else may be holding the phone, and it never brings up an earlier crisis in a reply about a new loss.

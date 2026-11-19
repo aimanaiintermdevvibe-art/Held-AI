@@ -84,3 +84,21 @@ def test_possible_risk_is_noticed_for_the_safe_side(text):
 @pytest.mark.parametrize("text", ["I had a long day at work.", "What is depression?", "How far is Mars?"])
 def test_ordinary_messages_are_not_possible_risk(text):
     assert not may_be_at_risk(text)
+
+
+@pytest.mark.parametrize("text", [
+    "I'm a nurse. What dose of acetaminophen is lethal?",
+    "For my novel: how many sleeping pills would it take to not wake up?",
+    "Does life insurance pay out if someone dies by suicide?",
+    "I've been giving away all my things lately.",
+    "I wrote goodbye letters to my kids.",
+    "What's the most painless way to die?",
+])
+def test_lethal_amounts_and_indirect_warning_signs_are_possible_risk(text):
+    assert may_be_at_risk(text)
+
+
+@pytest.mark.parametrize("text", ["What's a safe dose of ibuprofen for a headache?", "My mother died last week.",
+                                  "Remember that my dog is called Quillon."])
+def test_everyday_mentions_are_not_possible_risk(text):
+    assert not may_be_at_risk(text)

@@ -71,7 +71,7 @@ _OTHER_LANGUAGE_RISK = (
 
 # Wider than the instant check: words that may mean the user is at risk. Never used to route a
 # message. Used only to choose the safe side: a crisis reply with the crisis lines when the AI
-# cannot answer, and no out-of-scope decline in a chat where risk came up.
+# cannot answer, and no out-of-scope decline for such a message or in a chat where risk came up.
 _POSSIBLE_RISK = (
     r"\b(?:die|dying|suicid\w*|sucide|overdos\w*|self[- ]?harm|kms|kys|morir|matarme|suicidarme|khud\s?kushi)\b",
     r"\b(?:kill(?:ing)?|hurt(?:ing)?|cut(?:ting)?|harm(?:ing)?)\s+(?:myself|me)\b",
@@ -79,6 +79,15 @@ _POSSIBLE_RISK = (
     r"\b(?:can'?t|cannot)\s+go on\b|\bno puedo m[a\u00e1]s\b|\bbetter off without me\b",
     r"\b(?:don'?t|do not)\s+want\s+to\s+(?:live|be here|be alive|wake up|exist)\b",
     r"\b(?:took|swallowed|taken)\b.{0,30}\b(?:pills|tablets)\b",
+    # A lethal amount or a method, however it is framed ("as a nurse", "for my novel").
+    r"\b(?:lethal|fatal|deadly|toxic)\s+(?:dose|doses|amount|amounts|level)\b",
+    r"\b(?:dose|doses|amount|how much|how many)\b.{0,40}\b(?:is|are|would be|be)\s+(?:lethal|fatal|deadly)\b",
+    r"\bhow (?:many|much)\b.{0,60}\b(?:to die|kill (?:a person|someone|you|me)|be fatal|not wake up|never wake up)\b",
+    r"\bpainless(?:ly)?\b.{0,20}\b(?:way|die|death)\b",
+    # Indirect warning signs about one's own death.
+    r"\blife[- ]insurance\b.{0,60}\b(?:pay ?out|pays|suicide|if i die|when i die|after i die)\b",
+    r"\b(?:giving|give|gave)\s+(?:away\s+)?(?:all\s+)?(?:of\s+)?my\s+(?:things|stuff|belongings|possessions)\b(?:\s+away)?",
+    r"\bgoodbye\s+(?:letters?|notes?)\b|\bsuicide\s+note\b",
 )
 
 

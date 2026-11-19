@@ -23,6 +23,7 @@ from backend.ai_wrapper.memory import (
     repeats_safety_check_in,
     routing_view,
     with_recalled,
+    without_check_in,
 )
 from backend.ai_wrapper.profile import user_context
 from backend.ai_wrapper.support_resources import crisis_fallback, crisis_line, support_resources
@@ -283,15 +284,20 @@ class AgenticPipeline:
             mode = "grief"
             reply["note_tools"] = None
         if mode == "off_topic":
-            if risk_came_up(memory):
+            if risk_came_up(memory) or may_be_at_risk(prompt):
                 # Never a canned decline in a chat where the user's own risk came up ("I want to
-                # die... just kidding, what's for dinner?"): the writer checks in gently and
+                # die... just kidding, what's for dinner?"), or for a message that may show risk
+                # ("as a nurse, what dose of acetaminophen is lethal?"): the writer checks in and
                 # leaves the unrelated request out.
                 mode = "general_support"
             else:
                 # Outside mental health, caregiving and grief: declined without writing an
                 # answer. The instant crisis check above has already run on the message.
                 return off_topic_reply(memory)
+        if mode == "grief" and memory and memory.get("previous_conversations"):
+            # A loss gets the reply's full attention: no check-in about an earlier concern here.
+            memory = without_check_in(memory)
+            reply["memory"] = memory
         # recall searches the user's earlier chats; only when the message refers back to one.
         if recall and (intent.refers_to_earlier_chats or mentions_earlier_chats(prompt)):
             memory = with_recalled(memory, await recall(intent.recall_query or prompt), prompt)

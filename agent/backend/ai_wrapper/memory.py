@@ -370,6 +370,15 @@ def reasks_who_is_with_them(draft: str, memory: dict | None, prompt: str = "") -
     return found.group(0) if found else None
 
 
+def without_check_in(memory: dict | None) -> dict | None:
+    """The memory without earlier chats' safety concerns, so the reply makes no check-in about
+    them (a grief reply gives a new loss its full attention). The check-in waits for a later chat."""
+    if not memory or "previous_conversations" not in memory:
+        return memory
+    rest = {key: value for key, value in memory.items() if key != "previous_conversations"}
+    return rest if any(rest.get(key) for key in rest) else None
+
+
 def current_chat(memory: dict | None, last: int | None = None) -> dict | None:
     """This conversation's summary and its `last` messages, for the router and the reasoner.
     Routing and safety decisions are made from the current chat only, so a topic from an older
