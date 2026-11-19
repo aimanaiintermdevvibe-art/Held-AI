@@ -9,7 +9,7 @@ from backend.main import app
 
 @pytest.fixture
 def client(monkeypatch, fake_repo, auth):
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         return f"Answer to: {prompt}"
 
     async def title(*args):

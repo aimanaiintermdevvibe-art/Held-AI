@@ -169,7 +169,7 @@ async def save_session_summary(
         return False
     async with pool.acquire() as conn:
         result = await conn.execute(
-            f"""
+            """
             UPDATE "ChatSession" SET "sessionSummary" = $2, "lastSummarizedMessageId" = $3
             WHERE id = $1 AND "lastSummarizedMessageId" IS NOT DISTINCT FROM $4::text
             """,
@@ -413,7 +413,7 @@ async def get_previous_conversations(
         return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"""
+            """
             SELECT s.id, s.title, s."sessionSummary" AS summary, s."updatedAt",
                    s.metadata -> 'memory' ->> 'safety_raised_until' AS safety_raised_until,
                    (SELECT json_agg(json_build_object('role', m.role, 'content', left(m.content, $5))

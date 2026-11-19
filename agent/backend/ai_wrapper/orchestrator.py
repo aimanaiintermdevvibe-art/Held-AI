@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Awaitable, Callable
 
 from backend.ai_wrapper.agents.agent1_intent_guardrail import IntentGuardrailAgent
 from backend.ai_wrapper.agents.agent1_intent_guardrail.policy import has_immediate_crisis_language, may_be_at_risk
@@ -48,8 +49,6 @@ OFF_TOPIC_REPLIES = (
     "I can't help with that here, as I only support mental health, caregiving and grief. If you'd "
     "like to talk about how you're feeling or what you're dealing with, I'm listening.",
 )
-# Without a known country; the pipeline uses the verified lines for SUPPORT_COUNTRY.
-CRISIS_FALLBACK_RESPONSE = crisis_fallback(None)
 # How many of the latest messages a crisis reply looks back over before giving the crisis line
 # again: given in the first crisis reply of a chat, then not in every reply.
 CRISIS_LINE_LOOKBACK = 10
@@ -238,9 +237,8 @@ class AgenticPipeline:
 
     async def run(
         self, *, prompt: str, memory: dict | None = None, profile: dict | None = None,
-        notes: list[dict] | None = None,
-        recall: "Callable[[str], Awaitable[list[dict]]] | None" = None,
-        note_tools: "NoteTools | None" = None,
+        recall: Callable[[str], Awaitable[list[dict]]] | None = None,
+        note_tools: NoteTools | None = None,
         is_note: bool = False,
     ) -> str:
         """profile is the user's Held profile; its onboarding answers select one of the four
@@ -254,7 +252,7 @@ class AgenticPipeline:
         is unavailable (a rate limit, an outage) it gets the fixed crisis reply instead of an
         error."""
         try:
-            return await self._run(prompt=prompt, memory=memory, profile=profile, notes=notes,
+            return await self._run(prompt=prompt, memory=memory, profile=profile,
                                    recall=recall, note_tools=note_tools, is_note=is_note)
         except (RuntimeError, ValueError) as exc:
             if not may_be_at_risk(prompt):
@@ -264,15 +262,14 @@ class AgenticPipeline:
             return crisis_fallback(self.country)
 
     async def _run(
-        self, *, prompt: str, memory: dict | None, profile: dict | None, notes: list[dict] | None,
-        recall: "Callable[[str], Awaitable[list[dict]]] | None", note_tools: "NoteTools | None",
+        self, *, prompt: str, memory: dict | None, profile: dict | None,
+        recall: Callable[[str], Awaitable[list[dict]]] | None, note_tools: NoteTools | None,
         is_note: bool,
     ) -> str:
         context = user_context(profile)
-        notes = notes or None  # the user's grief notes, only when the message refers to them
         # note_tools: the read-only grief note tools, bound to the signed-in user; the writer decides
         # whether to call them. They are not offered for a crisis reply.
-        reply = dict(memory=memory, context=context, notes=notes, note_tools=note_tools, is_note=is_note)
+        reply = dict(memory=memory, context=context, note_tools=note_tools, is_note=is_note)
         if has_immediate_crisis_language(prompt):
             return await self._respond(prompt, mode="crisis", **reply)
 

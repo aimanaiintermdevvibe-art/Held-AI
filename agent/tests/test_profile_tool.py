@@ -56,7 +56,7 @@ def chats(fake_repo, auth, monkeypatch):
     """Chats as usr_1, recording the profile each reply was written with and each database read."""
     seen, reads = [], []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         seen.append(profile)
         return "Reply"
 

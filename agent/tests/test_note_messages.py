@@ -16,7 +16,7 @@ from test_note_tools import ToolCallingProvider, audit_inputs, pipeline_for
 def chat(fake_repo, auth, monkeypatch):
     seen = []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         seen.append({"prompt": prompt, "is_note": is_note, "memory": memory})
         return "Reply"
 

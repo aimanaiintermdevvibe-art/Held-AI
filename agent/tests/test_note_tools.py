@@ -80,7 +80,7 @@ def test_every_query_is_for_the_bound_user(db):
 def test_the_endpoint_binds_the_tools_to_the_token_user(fake_repo, auth, monkeypatch):
     seen = []
 
-    async def pipeline_run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def pipeline_run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         seen.append(note_tools)
         return "Answer"
 

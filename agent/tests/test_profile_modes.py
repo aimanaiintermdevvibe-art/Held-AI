@@ -39,7 +39,7 @@ def seen_profiles(fake_repo, auth, monkeypatch):
     """Run chats as usr_1 and record the profile each reply was written with."""
     seen = []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         seen.append(profile)
         return "Answer"
 

@@ -102,7 +102,7 @@ def test_the_confirming_profile_is_reused_for_the_reply(client, held_me, monkeyp
     lookup = AsyncMock(return_value={})
     seen = []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         seen.append(profile)
         return "Answer"
 

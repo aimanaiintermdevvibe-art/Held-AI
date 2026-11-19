@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from backend.api.routers import agentic
 from backend.ai_wrapper.contracts import AuditDecision, ClinicalAnalysis, GriefAnalysis, IntentDecision
 from backend.ai_wrapper.orchestrator import (
-    CRISIS_FALLBACK_RESPONSE,
     OFF_TOPIC_REPLIES,
     SAFE_RESPONSE,
     AgenticPipeline,
@@ -17,6 +16,7 @@ from backend.ai_wrapper.orchestrator import (
 from backend.ai_wrapper.support_resources import crisis_fallback, crisis_line
 from backend.core.config import Settings
 
+CRISIS_FALLBACK_RESPONSE = crisis_fallback(None)  # no known country
 US_CRISIS_FALLBACK = crisis_fallback("US")  # the pipeline's SUPPORT_COUNTRY is US by default
 US_CRISIS_LINE = crisis_line("US")[1]
 from backend.db import repository
@@ -867,7 +867,7 @@ def test_only_the_first_new_chat_after_a_concern_checks_in(fake_repo, auth, monk
     """A check-in about an earlier concern is stored, and later new chats no longer get it."""
     seen = []
 
-    async def run(*, prompt, memory=None, profile=None, notes=None, recall=None, note_tools=None, is_note=False):
+    async def run(*, prompt, memory=None, profile=None, recall=None, note_tools=None, is_note=False):
         recaps = (memory or {}).get("previous_conversations") or []
         concerns = [c for r in recaps for c in r.get("safety_concerns", [])]
         seen.append(concerns)
